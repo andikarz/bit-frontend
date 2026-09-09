@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import { LandingPage } from './pages/LandingPage';
 import { InternalLoginPage } from './pages/InternalLoginPage';
@@ -19,6 +19,10 @@ export default function App() {
 
           {/* Internal Staff Login */}
           <Route path="/internal/login" element={<InternalLoginPage />} />
+          <Route path="/internal" element={<Navigate to="/internal/login" replace />} />
+          <Route path="/login-internal" element={<InternalLoginPage />} />
+          <Route path="/internal/verifikator" element={<Navigate to="/verifikator" replace />} />
+          <Route path="/internal/wawancara" element={<Navigate to="/wawancara" replace />} />
 
           {/* Peserta Registration & Application Wizard (Fase 4) */}
           <Route
