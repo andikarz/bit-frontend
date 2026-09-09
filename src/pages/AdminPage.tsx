@@ -173,6 +173,8 @@ export const AdminPage: React.FC = () => {
   const [editUserFullName, setEditUserFullName] = useState('');
   const [editUserRole, setEditUserRole] = useState('');
   const [editUserStatus, setEditUserStatus] = useState<'ACTIVE' | 'INACTIVE'>('ACTIVE');
+  const [userSearch, setUserSearch] = useState('');
+  const [userRoleFilter, setUserRoleFilter] = useState('');
 
   // ── 4. Roles & Permissions State (Setting System -> Roles) ───
   const [roles, setRoles] = useState<RoleItem[]>([]);
@@ -454,7 +456,7 @@ export const AdminPage: React.FC = () => {
             nik: u.nik,
             fullName: u.fullName || u.full_name,
             email: u.email,
-            role: u.role?.name || u.role_name || u.role || 'VERIFIKATOR',
+            role: u.role?.name || u.role_name || u.role || 'PESERTA',
             status: u.status || 'ACTIVE'
           }))
         );
@@ -1154,6 +1156,23 @@ export const AdminPage: React.FC = () => {
     'Setting System & RBAC': allPermissions.filter(p => p.resource === 'users' || p.resource === 'roles' || p.resource === 'menus'),
     'Portal Calon Peserta': allPermissions.filter(p => p.resource === 'applications')
   };
+
+  // Filtered users list for Setting System -> Users
+  const filteredUsers = internalUsers.filter(u => {
+    const searchLower = userSearch.toLowerCase();
+    const matchSearch =
+      !userSearch ||
+      (u.fullName && u.fullName.toLowerCase().includes(searchLower)) ||
+      (u.email && u.email.toLowerCase().includes(searchLower)) ||
+      (u.nik && u.nik.includes(userSearch));
+
+    if (!matchSearch) return false;
+    if (!userRoleFilter) return true;
+    if (userRoleFilter === 'INTERNAL') {
+      return ['ADMIN', 'VERIFIKATOR', 'LEMBAGA_SELEKSI'].includes(u.role);
+    }
+    return u.role === userRoleFilter;
+  });
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: '#f8f9fa' }}>
@@ -1870,7 +1889,7 @@ export const AdminPage: React.FC = () => {
             {activeSettingSubTab === 'users' && (
               <div className="card border-0 shadow-sm">
                 <div className="card-header bg-white py-3 d-flex justify-content-between align-items-center">
-                  <h6 className="fw-bold mb-0">Manajemen Users Internal</h6>
+                  <h6 className="fw-bold mb-0">Manajemen Pengguna &amp; Petugas Internal</h6>
                   <button
                     className="btn btn-primary btn-sm"
                     onClick={() => setIsAddUserOpen(true)}
@@ -1878,6 +1897,39 @@ export const AdminPage: React.FC = () => {
                     <i className="bi bi-person-plus me-1"></i>Tambah User Internal
                   </button>
                 </div>
+
+                {/* Filter & Pencarian Pengguna */}
+                <div className="p-3 border-bottom bg-light">
+                  <div className="row g-2 align-items-center">
+                    <div className="col-md-7">
+                      <div className="input-group input-group-sm">
+                        <span className="input-group-text bg-white"><i className="bi bi-search"></i></span>
+                        <input
+                          type="text"
+                          className="form-control"
+                          placeholder="Cari NIK / Nama / Email..."
+                          value={userSearch}
+                          onChange={(e) => setUserSearch(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                    <div className="col-md-5">
+                      <select
+                        className="form-select form-select-sm"
+                        value={userRoleFilter}
+                        onChange={(e) => setUserRoleFilter(e.target.value)}
+                      >
+                        <option value="">Semua Role Pengguna</option>
+                        <option value="INTERNAL">Hanya Petugas Internal (Admin, Verifikator, Lembaga)</option>
+                        <option value="PESERTA">Hanya Calon Peserta</option>
+                        <option value="ADMIN">Administrator</option>
+                        <option value="VERIFIKATOR">Verifikator</option>
+                        <option value="LEMBAGA_SELEKSI">Lembaga Seleksi</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="card-body p-0">
                   <div className="table-responsive">
                     <table className="table table-hover align-middle mb-0">
@@ -1895,11 +1947,17 @@ export const AdminPage: React.FC = () => {
                           <tr>
                             <td colSpan={5} className="text-center py-4 text-muted">
                               <div className="spinner-border spinner-border-sm me-2 text-primary"></div>
-                              Memuat data users internal...
+                              Memuat data users...
+                            </td>
+                          </tr>
+                        ) : filteredUsers.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="text-center py-4 text-muted">
+                              Tidak ada data pengguna yang sesuai dengan filter.
                             </td>
                           </tr>
                         ) : (
-                          internalUsers.map((u) => (
+                          filteredUsers.map((u) => (
                             <tr key={u.id}>
                               <td>
                                 <strong>{u.fullName}</strong>
@@ -1912,8 +1970,12 @@ export const AdminPage: React.FC = () => {
                                   <span className="badge bg-danger">Administrator</span>
                                 ) : u.role === 'LEMBAGA_SELEKSI' ? (
                                   <span className="badge bg-warning text-dark">Lembaga Seleksi</span>
-                                ) : (
+                                ) : u.role === 'PESERTA' ? (
+                                  <span className="badge bg-info text-dark">Calon Peserta</span>
+                                ) : u.role === 'VERIFIKATOR' ? (
                                   <span className="badge bg-primary">Verifikator</span>
+                                ) : (
+                                  <span className="badge bg-secondary">{u.role}</span>
                                 )}
                               </td>
                               <td>
@@ -1947,6 +2009,7 @@ export const AdminPage: React.FC = () => {
                   </div>
                 </div>
               </div>
+
             )}
 
             {/* Subtab 2: CRUD Role & Akses Menu */}
@@ -2533,15 +2596,16 @@ export const AdminPage: React.FC = () => {
                     />
                   </div>
                   <div className="mb-3">
-                    <label className="form-label fw-semibold small">Role Petugas</label>
+                    <label className="form-label fw-semibold small">Role Pengguna</label>
                     <select
                       className="form-select"
                       value={editUserRole}
                       onChange={(e) => setEditUserRole(e.target.value)}
                     >
-                      <option value="VERIFIKATOR">Verifikator</option>
-                      <option value="LEMBAGA_SELEKSI">Lembaga Seleksi</option>
-                      <option value="ADMIN">Administrator</option>
+                      <option value="PESERTA">Calon Peserta (Peserta Pendaftar Beasiswa)</option>
+                      <option value="VERIFIKATOR">Verifikator (Seleksi Dokumen)</option>
+                      <option value="LEMBAGA_SELEKSI">Lembaga Seleksi (Wawancara)</option>
+                      <option value="ADMIN">Administrator (Sistem)</option>
                     </select>
                   </div>
                   <div className="mb-3">
