@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 
 interface LoginModalProps {
@@ -17,6 +18,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onSuccess,
 }) => {
   const { login } = useAuth();
+  const navigate = useNavigate();
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -30,9 +32,19 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setIsSubmitting(true);
 
     try {
-      await login(identifier.trim(), password);
+      const loggedUser = await login(identifier.trim(), password);
       onClose();
-      if (onSuccess) onSuccess();
+      if (onSuccess) {
+        onSuccess();
+      } else if (loggedUser.role === 'PESERTA') {
+        navigate('/daftar');
+      } else if (loggedUser.role === 'ADMIN') {
+        navigate('/admin');
+      } else if (loggedUser.role === 'VERIFIKATOR') {
+        navigate('/verifikator');
+      } else if (loggedUser.role === 'LEMBAGA_SELEKSI') {
+        navigate('/wawancara');
+      }
     } catch (err: any) {
       setError(err.message || 'Gagal masuk. Periksa kembali NIK/Email dan kata sandi Anda.');
     } finally {

@@ -9,6 +9,20 @@ interface RegionItem {
   name: string;
 }
 
+interface UploadedDocInfo {
+  documentId: string;
+  originalFilename: string;
+  fileSize: number;
+  mimeType: string;
+  isClean: boolean;
+  sha256Hash?: string;
+}
+
+interface UploadState {
+  status: 'idle' | 'reserving' | 'uploading' | 'scanning' | 'done' | 'error';
+  message?: string;
+}
+
 export const ApplicationWizardPage: React.FC = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -18,14 +32,19 @@ export const ApplicationWizardPage: React.FC = () => {
   const [currentStep, setCurrentStep] = useState(1);
   const [applicationId, setApplicationId] = useState<string | null>(null);
   const [registrationCode, setRegistrationCode] = useState<string | null>(null);
+  const [submissionStatus, setSubmissionStatus] = useState<string>('DRAFT');
+  const [submittedAt, setSubmittedAt] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<number>(1);
   const [programName, setProgramName] = useState('Pelatihan Beasiswa');
   const [programRequirements, setProgramRequirements] = useState<any[]>([]);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   // ── Step 1 Form State (Data Diri) ───────────────────────────
   const [nik, setNik] = useState(user?.nik || '');
@@ -59,21 +78,33 @@ export const ApplicationWizardPage: React.FC = () => {
   const [graduationYear, setGraduationYear] = useState<number>(2024);
   const [currentOccupation, setCurrentOccupation] = useState('');
 
+  // ── Step 3 Form State (Dokumen) ─────────────────────────────
+  const [uploadedDocs, setUploadedDocs] = useState<Record<string, UploadedDocInfo>>({});
+  const [uploadingDoc, setUploadingDoc] = useState<Record<string, UploadState>>({});
+
   // ── Step 4 Form State (Persetujuan) ─────────────────────────
   const [agreed, setAgreed] = useState(false);
+
+  // Helper: Format byte size
+  const formatBytes = (bytes: number): string => {
+    if (!bytes || bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
 
   // 1. Initialize or load existing active draft
   useEffect(() => {
     const initApplication = async () => {
       setIsLoading(true);
       try {
-        // Load active draft
         let appData: any = null;
         try {
           const res = await api.get('/api/v1/applications/my-active');
           if (res.data) appData = res.data;
         } catch {
-          // No active draft
+          // No active draft yet
         }
 
         // If no active draft, create one with idempotency key
@@ -90,6 +121,8 @@ export const ApplicationWizardPage: React.FC = () => {
         if (appData) {
           setApplicationId(appData.id);
           setRegistrationCode(appData.registrationCode);
+          setSubmissionStatus(appData.submissionStatus || 'DRAFT');
+          setSubmittedAt(appData.submittedAt || null);
           setAppVersion(appData.version || 1);
           setCurrentStep(appData.currentStep || 1);
 
@@ -121,6 +154,26 @@ export const ApplicationWizardPage: React.FC = () => {
           if (e.graduation_year) setGraduationYear(e.graduation_year);
           if (e.current_occupation) setCurrentOccupation(e.current_occupation);
 
+          // Populate documents if exist
+          const rawDocs = appData.documents || appData.documentBindings || [];
+          if (Array.isArray(rawDocs) && rawDocs.length > 0) {
+            const docsMap: Record<string, UploadedDocInfo> = {};
+            for (const d of rawDocs) {
+              const code = d.requirement_type_code || d.requirementTypeCode;
+              if (code) {
+                docsMap[code] = {
+                  documentId: d.document_id || d.documentId,
+                  originalFilename: d.original_filename || d.originalFilename || 'Dokumen Terunggah',
+                  fileSize: Number(d.file_size || d.fileSize || 0),
+                  mimeType: d.mime_type || d.mimeType || 'application/pdf',
+                  isClean: Boolean(d.is_clean ?? d.isClean),
+                  sha256Hash: d.sha256_hash || d.sha256Hash
+                };
+              }
+            }
+            setUploadedDocs(docsMap);
+          }
+
           // Populate consent if exists
           if (appData.consent?.agreed_at) {
             setAgreed(true);
@@ -143,7 +196,6 @@ export const ApplicationWizardPage: React.FC = () => {
         if (res.data) setProvinces(res.data);
       })
       .catch(() => {
-        // Fallback demo provinces
         setProvinces([
           { id: '1', code: '31', name: 'DKI JAKARTA' },
           { id: '2', code: '32', name: 'JAWA BARAT' },
@@ -188,7 +240,7 @@ export const ApplicationWizardPage: React.FC = () => {
       });
   }, [districtCode]);
 
-  // ── Save Handlers per Step (AT-05: Optimistic Concurrency) ───
+  // ── Step 1 Save (Data Diri) ─────────────────────────────────
   const saveStep1 = async (): Promise<boolean> => {
     if (!applicationId) return false;
     if (!birthPlace || !birthDate || !phoneNumber || !address) {
@@ -226,6 +278,7 @@ export const ApplicationWizardPage: React.FC = () => {
     }
   };
 
+  // ── Step 2 Save (Pendidikan) ────────────────────────────────
   const saveStep2 = async (): Promise<boolean> => {
     if (!applicationId) return false;
     if (!institutionName) {
@@ -255,10 +308,85 @@ export const ApplicationWizardPage: React.FC = () => {
     }
   };
 
+  // ── Step 3 Document Upload Handler ──────────────────────────
+  const handleFileUpload = async (reqCode: string, file: File) => {
+    if (!applicationId) return;
+
+    // Check size limit: 2MB (2,097,152 bytes)
+    if (file.size > 2 * 1024 * 1024) {
+      setSaveError(`Berkas "${file.name}" (${(file.size / 1024 / 1024).toFixed(2)} MB) melebihi batas maksimal 2MB.`);
+      return;
+    }
+
+    setSaveError(null);
+    setSaveSuccess(null);
+    setUploadingDoc(prev => ({
+      ...prev,
+      [reqCode]: { status: 'reserving', message: 'Membuat reservasi upload (TTL 5 menit)...' }
+    }));
+
+    try {
+      // 1. Create reservation in Transaksi
+      const resRes = await api.post(`/api/v1/applications/${applicationId}/reservations`, {
+        requirementTypeCode: reqCode
+      });
+      const reservationId = resRes.data.id;
+
+      // 2. Upload file multipart and trigger ClamAV scanner
+      setUploadingDoc(prev => ({
+        ...prev,
+        [reqCode]: { status: 'uploading', message: 'Mengunggah & memindai dengan ClamAV...' }
+      }));
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('reservationId', reservationId);
+
+      const uploadRes = await api.post('/api/v1/documents', formData);
+      const doc = uploadRes.data;
+
+      const isClean = doc.scanStatus === 'CLEAN';
+
+      setUploadedDocs(prev => ({
+        ...prev,
+        [reqCode]: {
+          documentId: doc.id,
+          originalFilename: doc.originalFilename,
+          fileSize: doc.fileSize,
+          mimeType: doc.mimeType,
+          isClean,
+          sha256Hash: doc.sha256Hash
+        }
+      }));
+
+      if (isClean) {
+        setUploadingDoc(prev => ({
+          ...prev,
+          [reqCode]: { status: 'done', message: 'Dokumen lolos pemindaian antivirus & terverifikasi!' }
+        }));
+        setSaveSuccess(`Dokumen ${file.name} berhasil diunggah dan terverifikasi bersih oleh ClamAV.`);
+      } else {
+        setUploadingDoc(prev => ({
+          ...prev,
+          [reqCode]: { status: 'error', message: 'PERINGATAN: Berkas terindikasi virus/malware oleh ClamAV dan ditolak.' }
+        }));
+        setSaveError(`Berkas ${file.name} ditolak karena terdeteksi potensi ancaman malware.`);
+      }
+    } catch (err: any) {
+      const msg = err.message || 'Gagal mengunggah dokumen';
+      setUploadingDoc(prev => ({
+        ...prev,
+        [reqCode]: { status: 'error', message: msg }
+      }));
+      setSaveError(`Gagal mengunggah dokumen ${file.name}: ${msg}`);
+    }
+  };
+
+  // ── Step 4 Save (Persetujuan) ───────────────────────────────
   const saveStep4 = async (): Promise<boolean> => {
     if (!applicationId) return false;
     if (!agreed) {
-      setSaveError('Anda wajib mencentang persetujuan keabsahan data sebelum mengirim');
+      setSaveError('Anda wajib menyetujui pernyataan keabsahan data sebelum mengirim permohonan.');
       return false;
     }
 
@@ -275,13 +403,46 @@ export const ApplicationWizardPage: React.FC = () => {
       setSaveSuccess('Persetujuan berhasil disimpan');
       return true;
     } catch (err: any) {
-      setSaveError(err.message || 'Gagal menyimpan persetujuan');
+      setSaveError(err.message || 'Gagal menyimpan lembar persetujuan');
       return false;
     } finally {
       setIsSaving(false);
     }
   };
 
+  // ── Step 4 Final Submit ─────────────────────────────────────
+  const handleFinalSubmit = async () => {
+    if (!applicationId) return;
+    setIsSubmitting(true);
+    setSaveError(null);
+
+    try {
+      // 1. Save consent first
+      const consentOk = await saveStep4();
+      if (!consentOk) {
+        setShowSubmitModal(false);
+        setIsSubmitting(false);
+        return;
+      }
+
+      // 2. Submit application atomically (AT-08)
+      const res = await api.post(`/api/v1/applications/${applicationId}/submit`, {
+        expectedVersion: appVersion
+      });
+
+      setSubmissionStatus('SUBMITTED');
+      setSubmittedAt(new Date().toISOString());
+      setShowSubmitModal(false);
+      setSaveSuccess('Pendaftaran beasiswa Anda berhasil dikirimkan dan masuk ke tahap verifikasi berkas!');
+    } catch (err: any) {
+      setShowSubmitModal(false);
+      setSaveError(err.message || 'Gagal mengirimkan pendaftaran');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // ── Navigation Wizard ───────────────────────────────────────
   const handleNext = async () => {
     setSaveSuccess(null);
     setSaveError(null);
@@ -293,12 +454,31 @@ export const ApplicationWizardPage: React.FC = () => {
       const ok = await saveStep2();
       if (ok) setCurrentStep(3);
     } else if (currentStep === 3) {
-      // Step 3 Document uploads (Fase 5 wires full uploads)
+      // Validate mandatory documents before going to Step 4
+      const reqs = programRequirements.length > 0 ? programRequirements : [
+        { requirementTypeId: 'req-ktp-uuid', code: 'KTP', name: 'Kartu Tanda Penduduk (KTP)', isRequired: true },
+        { requirementTypeId: 'req-kk-uuid', code: 'KK', name: 'Kartu Keluarga (KK)', isRequired: true },
+        { requirementTypeId: 'req-ijazah-uuid', code: 'IJAZAH', name: 'Ijazah Terakhir', isRequired: true }
+      ];
+
+      const mandatory = reqs.filter((r: any) => r.isRequired || r.isMandatory || r.is_mandatory || r.is_required);
+      const missing = mandatory.filter((m: any) => {
+        const code = m.code || m.requirementTypeCode || m.requirement_type_code;
+        return !uploadedDocs[code]?.isClean;
+      });
+
+      if (missing.length > 0) {
+        setSaveError(`Dokumen wajib berikut belum diunggah atau belum lolos verifikasi antivirus: ${missing.map((m: any) => m.name || m.code).join(', ')}`);
+        return;
+      }
+
       setCurrentStep(4);
     }
   };
 
   const handlePrev = () => {
+    setSaveSuccess(null);
+    setSaveError(null);
     if (currentStep > 1) {
       setCurrentStep(currentStep - 1);
     }
@@ -310,17 +490,218 @@ export const ApplicationWizardPage: React.FC = () => {
     else if (currentStep === 4) await saveStep4();
   };
 
+  const copyRegistrationCode = () => {
+    if (registrationCode) {
+      navigator.clipboard.writeText(registrationCode);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    }
+  };
+
+  // Requirements list to render
+  const activeRequirements = programRequirements.length > 0 ? programRequirements : [
+    { requirementTypeId: 'req-ktp-uuid', code: 'KTP', name: 'Kartu Tanda Penduduk (KTP)', description: 'Scan KTP asli yang masih berlaku', isRequired: true },
+    { requirementTypeId: 'req-kk-uuid', code: 'KK', name: 'Kartu Keluarga (KK)', description: 'Scan Kartu Keluarga terbaru', isRequired: true },
+    { requirementTypeId: 'req-ijazah-uuid', code: 'IJAZAH', name: 'Ijazah Terakhir', description: 'Scan Ijazah pendidikan terakhir / SKL', isRequired: true },
+    { requirementTypeId: 'req-transkrip-uuid', code: 'TRANSKRIP', name: 'Transkrip Nilai', description: 'Scan Transkrip akademik resmi', isRequired: true },
+    { requirementTypeId: 'req-cv-uuid', code: 'CV', name: 'Curriculum Vitae (CV)', description: 'CV format terkini dalam PDF', isRequired: true },
+    { requirementTypeId: 'req-sertif-uuid', code: 'SERTIFIKAT', name: 'Sertifikat Pendukung', description: 'Sertifikat kompetensi atau prestasi relevan', isRequired: false }
+  ];
+
   if (isLoading) {
     return (
       <div className="min-vh-100 d-flex align-items-center justify-content-center bg-light">
         <div className="text-center">
-          <div className="spinner-border text-primary mb-2" role="status"></div>
-          <p className="text-muted small">Menyiapkan formulir pendaftaran...</p>
+          <div className="spinner-border text-primary mb-3" role="status" style={{ width: '3rem', height: '3rem' }}></div>
+          <h6 className="fw-bold text-secondary">Menyiapkan Formulir Pendaftaran...</h6>
+          <p className="text-muted small">Memuat data permohonan dan persyaratan program beasiswa</p>
         </div>
       </div>
     );
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // VIEW: POST-SUBMISSION CONFIRMATION DASHBOARD
+  // (Sesuai Mockup Calon Pendaftar/3_index_setelah_daftar.html)
+  // ══════════════════════════════════════════════════════════════
+  if (submissionStatus === 'SUBMITTED' || submissionStatus === 'RESUBMITTED') {
+    return (
+      <div className="bg-light min-vh-100 pb-5">
+        {/* Navigation Bar */}
+        <nav className="navbar navbar-expand-lg navbar-dark bg-primary sticky-top shadow-sm">
+          <div className="container">
+            <Link className="navbar-brand fw-bold" to="/">
+              <i className="bi bi-mortarboard-fill me-2"></i>BeasiswaApp
+            </Link>
+            <div className="dropdown ms-auto">
+              <button className="btn btn-outline-light dropdown-toggle btn-sm" type="button" data-bs-toggle="dropdown">
+                <i className="bi bi-person-circle me-1"></i> {fullName || user?.fullName || user?.email}
+              </button>
+              <ul className="dropdown-menu dropdown-menu-end shadow border-0">
+                <li><Link className="dropdown-item" to="/"><i className="bi bi-house me-2"></i>Beranda</Link></li>
+                <li><hr className="dropdown-divider" /></li>
+                <li><button className="dropdown-item text-danger" onClick={() => logout()}><i className="bi bi-box-arrow-right me-2"></i>Keluar</button></li>
+              </ul>
+            </div>
+          </div>
+        </nav>
+
+        <div className="container py-5" style={{ maxWidth: '900px' }}>
+          {/* Status Header Banner */}
+          <div className="card shadow-sm border-0 mb-4 overflow-hidden">
+            <div className="card-body p-4 text-center bg-white">
+              <div className="d-inline-flex align-items-center justify-content-center bg-success-subtle text-success rounded-circle mb-3" style={{ width: '72px', height: '72px' }}>
+                <i className="bi bi-check2-circle fs-1"></i>
+              </div>
+              <h3 className="fw-bold text-dark mb-1">Pendaftaran Beasiswa Berhasil Dikirim!</h3>
+              <p className="text-muted mb-3">
+                Permohonan Anda telah tersimpan secara resmi dan saat ini sedang menunggu antrean verifikasi berkas administrasi.
+              </p>
+
+              {/* Registration Code Badge */}
+              <div className="d-inline-flex align-items-center gap-2 bg-light border rounded-pill px-4 py-2 mb-3">
+                <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
+                <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
+                <button
+                  className="btn btn-sm btn-outline-primary border-0 rounded-circle"
+                  title="Salin Nomor Registrasi"
+                  onClick={copyRegistrationCode}
+                >
+                  <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
+                </button>
+              </div>
+              {copiedCode && <div className="text-success small fw-semibold">Nomor registrasi berhasil disalin!</div>}
+
+              <div className="d-flex justify-content-center gap-2 mt-2">
+                <span className="badge bg-primary px-3 py-2 fs-6 fw-semibold">
+                  <i className="bi bi-shield-check me-1"></i> Status: SUBMITTED
+                </span>
+                <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-semibold">
+                  <i className="bi bi-hourglass-split me-1"></i> Administrasi: PENDING
+                </span>
+              </div>
+              {submittedAt && (
+                <div className="text-muted small mt-2">
+                  <i className="bi bi-clock me-1"></i> Dikirim pada: {new Date(submittedAt).toLocaleString('id-ID')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Timeline Tahapan Seleksi */}
+          <div className="card shadow-sm border-0 mb-4">
+            <div className="card-header bg-white border-bottom py-3">
+              <h6 className="fw-bold mb-0 text-dark">
+                <i className="bi bi-diagram-3 me-2 text-primary"></i>Tahapan Proses Seleksi
+              </h6>
+            </div>
+            <div className="card-body p-4">
+              <div className="row g-3 text-center">
+                <div className="col-md-3">
+                  <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
+                    <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
+                    <strong className="d-block small">1. Pengisian Formulir</strong>
+                    <span className="badge bg-success mt-1">Selesai</span>
+                  </div>
+                </div>
+                <div className="col-md-3">
+                  <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
+                    <i className="bi bi-arrow-repeat fs-3 mb-2 d-block text-primary"></i>
+                    <strong className="d-block small">2. Verifikasi Berkas</strong>
+                    <span className="badge bg-primary mt-1">Sedang Berjalan</span>
+                  </div>
+                </div>
+                <div className="col-md-3">
+                  <div className="p-3 rounded border bg-light text-muted h-100">
+                    <i className="bi bi-chat-left-dots fs-3 mb-2 d-block"></i>
+                    <strong className="d-block small">3. Seleksi Wawancara</strong>
+                    <span className="badge bg-secondary mt-1">Akan Datang</span>
+                  </div>
+                </div>
+                <div className="col-md-3">
+                  <div className="p-3 rounded border bg-light text-muted h-100">
+                    <i className="bi bi-award fs-3 mb-2 d-block"></i>
+                    <strong className="d-block small">4. Pengumuman Kelulusan</strong>
+                    <span className="badge bg-secondary mt-1">Menunggu</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Ringkasan Data yang Dikirimkan */}
+          <div className="card shadow-sm border-0 mb-4">
+            <div className="card-header bg-white border-bottom py-3">
+              <h6 className="fw-bold mb-0 text-dark">
+                <i className="bi bi-file-earmark-person me-2 text-primary"></i>Ringkasan Data Permohonan
+              </h6>
+            </div>
+            <div className="card-body p-4">
+              <div className="row g-3">
+                <div className="col-md-6">
+                  <small className="text-muted d-block">Program Beasiswa</small>
+                  <strong>{programName}</strong>
+                </div>
+                <div className="col-md-6">
+                  <small className="text-muted d-block">Nama Lengkap</small>
+                  <strong>{fullName}</strong>
+                </div>
+                <div className="col-md-6">
+                  <small className="text-muted d-block">NIK (Nomor Induk Kependudukan)</small>
+                  <span className="font-monospace">{nik}</span>
+                </div>
+                <div className="col-md-6">
+                  <small className="text-muted d-block">Alamat Email &amp; No. HP</small>
+                  <span>{email} | {phoneNumber}</span>
+                </div>
+                <div className="col-md-6">
+                  <small className="text-muted d-block">Domisili</small>
+                  <span>{villageName}, {districtName}, {regencyName}, {provinceName}</span>
+                </div>
+                <div className="col-md-6">
+                  <small className="text-muted d-block">Pendidikan &amp; Instansi</small>
+                  <span>{educationLevel} — {institutionName} {major ? `(${major})` : ''}</span>
+                </div>
+              </div>
+
+              <hr className="my-3" />
+
+              <h6 className="fw-bold small text-secondary mb-2">Dokumen Terlampir &amp; Terverifikasi:</h6>
+              <div className="row g-2">
+                {Object.entries(uploadedDocs).map(([code, doc]) => (
+                  <div className="col-md-6" key={code}>
+                    <div className="p-2 border rounded bg-light d-flex align-items-center justify-content-between">
+                      <div className="d-flex align-items-center gap-2 overflow-hidden">
+                        <i className="bi bi-file-earmark-pdf text-danger fs-4"></i>
+                        <div className="text-truncate">
+                          <strong className="small d-block text-truncate">{doc.originalFilename}</strong>
+                          <span className="text-muted" style={{ fontSize: '0.75rem' }}>
+                            {code} • {formatBytes(doc.fileSize)}
+                          </span>
+                        </div>
+                      </div>
+                      <span className="badge bg-success-subtle text-success border border-success-subtle rounded-pill">
+                        <i className="bi bi-shield-check me-1"></i> Clean
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="card-footer bg-white border-top p-3 text-center">
+              <Link to="/" className="btn btn-primary px-4 fw-semibold">
+                <i className="bi bi-house me-2"></i>Kembali ke Beranda
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // VIEW: 4-STEP WIZARD FORM
+  // ══════════════════════════════════════════════════════════════
   return (
     <div className="bg-light min-vh-100 pb-5">
       {/* ── Navigation Bar ───────────────────────────────────── */}
@@ -354,111 +735,101 @@ export const ApplicationWizardPage: React.FC = () => {
         </div>
       </nav>
 
-      <div className="container py-4">
-        {/* Welcome & Info Alert */}
-        <div className="alert alert-primary border-0 shadow-sm d-flex align-items-center mb-4">
-          <i className="bi bi-info-circle-fill fs-3 me-3 flex-shrink-0 text-primary"></i>
-          <div>
-            <strong className="fs-6">Selamat Datang! Silakan Lengkapi Formulir Pendaftaran</strong>
-            <p className="mb-0 small">
-              Program: <strong>{programName}</strong> | No. Registrasi:{' '}
-              <code>{registrationCode || 'REG-PENDING'}</code>
-            </p>
+      <div className="container py-4" style={{ maxWidth: '960px' }}>
+        {/* ── Header Card ──────────────────────────────────────── */}
+        <div className="card shadow-sm border-0 mb-4">
+          <div className="card-body p-4">
+            <div className="d-flex flex-wrap justify-content-between align-items-center gap-3">
+              <div>
+                <span className="badge bg-primary-subtle text-primary mb-1">Formulir Pendaftaran Beasiswa</span>
+                <h4 className="fw-bold mb-1 text-dark">{programName}</h4>
+                <p className="text-muted small mb-0">
+                  Silakan isi seluruh tahapan data dengan teliti dan unggah dokumen persyaratan yang sah.
+                </p>
+              </div>
+              <div className="text-end">
+                <div className="small text-muted">Kode Registrasi:</div>
+                <div className="fw-bold font-monospace text-primary fs-5">{registrationCode || 'REG-PENDING'}</div>
+                <span className="badge bg-secondary-subtle text-secondary border">Status: {submissionStatus}</span>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Global Notifications */}
+        {/* ── Step Indicator Bar ───────────────────────────────── */}
+        <div className="card shadow-sm border-0 mb-4">
+          <div className="card-body p-3">
+            <div className="row g-2 text-center">
+              {[
+                { step: 1, label: 'Data Diri', icon: 'bi-person' },
+                { step: 2, label: 'Pendidikan', icon: 'bi-mortarboard' },
+                { step: 3, label: 'Unggah Berkas', icon: 'bi-file-earmark-arrow-up' },
+                { step: 4, label: 'Persetujuan & Submit', icon: 'bi-shield-check' }
+              ].map((s) => (
+                <div className="col-3" key={s.step}>
+                  <div
+                    className={`p-2 rounded d-flex flex-column align-items-center cursor-pointer transition ${
+                      currentStep === s.step
+                        ? 'bg-primary text-white fw-bold shadow-sm'
+                        : currentStep > s.step
+                        ? 'bg-light text-success fw-semibold border border-success-subtle'
+                        : 'bg-light text-muted'
+                    }`}
+                    style={{ cursor: s.step < currentStep ? 'pointer' : 'default' }}
+                    onClick={() => {
+                      if (s.step < currentStep) setCurrentStep(s.step);
+                    }}
+                  >
+                    <i className={`bi ${s.icon} fs-5 mb-1`}></i>
+                    <span className="small text-truncate w-100">
+                      {s.step}. {s.label}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Alerts ──────────────────────────────────────────── */}
         {saveSuccess && (
-          <div className="alert alert-success alert-dismissible fade show py-2 small mb-3">
-            <i className="bi bi-check-circle-fill me-2"></i>{saveSuccess}
+          <div className="alert alert-success alert-dismissible fade show shadow-sm" role="alert">
+            <i className="bi bi-check-circle me-2"></i>{saveSuccess}
             <button type="button" className="btn-close" onClick={() => setSaveSuccess(null)}></button>
           </div>
         )}
+
         {saveError && (
-          <div className="alert alert-danger alert-dismissible fade show py-2 small mb-3">
+          <div className="alert alert-danger alert-dismissible fade show shadow-sm" role="alert">
             <i className="bi bi-exclamation-triangle-fill me-2"></i>{saveError}
             <button type="button" className="btn-close" onClick={() => setSaveError(null)}></button>
           </div>
         )}
 
-        {/* ── 4-Step Wizard Container ─────────────────────────── */}
-        <div className="card border-0 shadow-sm overflow-hidden">
-          {/* Wizard Step Headers */}
-          <div className="bg-white border-bottom">
-            <div className="row g-0 text-center">
-              <div
-                className={`col-3 py-3 border-end ${
-                  currentStep === 1
-                    ? 'border-bottom border-primary border-3 fw-bold text-primary bg-light'
-                    : currentStep > 1
-                    ? 'border-bottom border-success border-3 text-success'
-                    : 'text-muted'
-                }`}
-              >
-                <i className={`bi ${currentStep > 1 ? 'bi-check-circle-fill' : 'bi-1-circle'} me-1`}></i>
-                <span className="d-none d-md-inline">1. Data Diri &amp; Kontak</span>
-                <span className="d-inline d-md-none">1. Diri</span>
-              </div>
-              <div
-                className={`col-3 py-3 border-end ${
-                  currentStep === 2
-                    ? 'border-bottom border-primary border-3 fw-bold text-primary bg-light'
-                    : currentStep > 2
-                    ? 'border-bottom border-success border-3 text-success'
-                    : 'text-muted'
-                }`}
-              >
-                <i className={`bi ${currentStep > 2 ? 'bi-check-circle-fill' : 'bi-2-circle'} me-1`}></i>
-                <span className="d-none d-md-inline">2. Pendidikan &amp; Pekerjaan</span>
-                <span className="d-inline d-md-none">2. Edukasi</span>
-              </div>
-              <div
-                className={`col-3 py-3 border-end ${
-                  currentStep === 3
-                    ? 'border-bottom border-primary border-3 fw-bold text-primary bg-light'
-                    : currentStep > 3
-                    ? 'border-bottom border-success border-3 text-success'
-                    : 'text-muted'
-                }`}
-              >
-                <i className={`bi ${currentStep > 3 ? 'bi-check-circle-fill' : 'bi-3-circle'} me-1`}></i>
-                <span className="d-none d-md-inline">3. Unggah Dokumen</span>
-                <span className="d-inline d-md-none">3. Berkas</span>
-              </div>
-              <div
-                className={`col-3 py-3 ${
-                  currentStep === 4
-                    ? 'border-bottom border-primary border-3 fw-bold text-primary bg-light'
-                    : 'text-muted'
-                }`}
-              >
-                <i className="bi bi-4-circle me-1"></i>
-                <span className="d-none d-md-inline">4. Persetujuan &amp; Submit</span>
-                <span className="d-inline d-md-none">4. Kirim</span>
-              </div>
-            </div>
-          </div>
-
+        {/* ── Main Form Container ──────────────────────────────── */}
+        <div className="card shadow-sm border-0">
           <div className="card-body p-4">
-            {/* ── STEP 1: DATA DIRI ──────────────────────────── */}
+            {/* ── STEP 1: DATA DIRI ───────────────────────────── */}
             {currentStep === 1 && (
               <div>
                 <h6 className="fw-bold mb-3 text-primary">
-                  <i className="bi bi-person-vcard me-2"></i>Bagian 1: Data Diri &amp; Informasi Kontak
+                  <i className="bi bi-person-badge me-2"></i>Bagian 1: Data Pribadi Calon Peserta
                 </h6>
                 <div className="row g-3">
                   <div className="col-md-6">
-                    <label className="form-label fw-semibold small">NIK (Nomor Induk Kependudukan) *</label>
+                    <label className="form-label fw-semibold small">Nomor Induk Kependudukan (NIK) *</label>
                     <input
                       type="text"
-                      className="form-control bg-light"
+                      className="form-control bg-light font-monospace"
                       value={nik}
                       readOnly
+                      title="NIK terdaftar otomatis dari akun Anda"
                     />
-                    <div className="form-text small">NIK terdaftar permanen sesuai akun.</div>
+                    <small className="text-muted" style={{ fontSize: '0.75rem' }}>NIK terkunci sesuai identitas pendaftaran akun</small>
                   </div>
+
                   <div className="col-md-6">
-                    <label className="form-label fw-semibold small">Nama Lengkap *</label>
+                    <label className="form-label fw-semibold small">Nama Lengkap Sesuai KTP *</label>
                     <input
                       type="text"
                       className="form-control"
@@ -467,17 +838,19 @@ export const ApplicationWizardPage: React.FC = () => {
                       required
                     />
                   </div>
+
                   <div className="col-md-4">
                     <label className="form-label fw-semibold small">Tempat Lahir *</label>
                     <input
                       type="text"
                       className="form-control"
-                      placeholder="Kota tempat lahir"
+                      placeholder="Contoh: Jakarta"
                       value={birthPlace}
                       onChange={(e) => setBirthPlace(e.target.value)}
                       required
                     />
                   </div>
+
                   <div className="col-md-4">
                     <label className="form-label fw-semibold small">Tanggal Lahir *</label>
                     <input
@@ -488,31 +861,32 @@ export const ApplicationWizardPage: React.FC = () => {
                       required
                     />
                   </div>
+
                   <div className="col-md-4">
                     <label className="form-label fw-semibold small">Jenis Kelamin *</label>
                     <select
                       className="form-select"
                       value={gender}
-                      onChange={(e) => setGender(e.target.value as any)}
+                      onChange={(e) => setGender(e.target.value as 'MALE' | 'FEMALE')}
                       required
                     >
                       <option value="MALE">Laki-laki</option>
                       <option value="FEMALE">Perempuan</option>
                     </select>
                   </div>
-                  <div className="col-md-12">
-                    <label className="form-label fw-semibold small">Alamat Domisili *</label>
+
+                  <div className="col-12">
+                    <label className="form-label fw-semibold small">Alamat Domisili Lengkap (Jalan, RT/RW, No. Rumah) *</label>
                     <textarea
                       className="form-control"
                       rows={2}
-                      placeholder="Nama jalan, RT/RW, nomor rumah"
+                      placeholder="Contoh: Jl. Merdeka No. 12 RT 01 / RW 02"
                       value={address}
                       onChange={(e) => setAddress(e.target.value)}
                       required
                     ></textarea>
                   </div>
 
-                  {/* Cascading Region Selectors */}
                   <div className="col-md-3">
                     <label className="form-label fw-semibold small">Provinsi *</label>
                     <select
@@ -535,8 +909,9 @@ export const ApplicationWizardPage: React.FC = () => {
                       ))}
                     </select>
                   </div>
+
                   <div className="col-md-3">
-                    <label className="form-label fw-semibold small">Kabupaten/Kota *</label>
+                    <label className="form-label fw-semibold small">Kabupaten / Kota *</label>
                     <select
                       className="form-select"
                       value={regencyCode}
@@ -557,6 +932,7 @@ export const ApplicationWizardPage: React.FC = () => {
                       ))}
                     </select>
                   </div>
+
                   <div className="col-md-3">
                     <label className="form-label fw-semibold small">Kecamatan *</label>
                     <select
@@ -578,8 +954,9 @@ export const ApplicationWizardPage: React.FC = () => {
                       ))}
                     </select>
                   </div>
+
                   <div className="col-md-3">
-                    <label className="form-label fw-semibold small">Kelurahan/Desa *</label>
+                    <label className="form-label fw-semibold small">Kelurahan / Desa *</label>
                     <select
                       className="form-select"
                       value={villageCode}
@@ -600,18 +977,19 @@ export const ApplicationWizardPage: React.FC = () => {
                   </div>
 
                   <div className="col-md-6">
-                    <label className="form-label fw-semibold small">Nomor HP / WhatsApp *</label>
+                    <label className="form-label fw-semibold small">Nomor HP / WhatsApp Aktif *</label>
                     <input
                       type="tel"
                       className="form-control"
-                      placeholder="contoh: 081234567890"
+                      placeholder="Contoh: 081234567890"
                       value={phoneNumber}
                       onChange={(e) => setPhoneNumber(e.target.value)}
                       required
                     />
                   </div>
+
                   <div className="col-md-6">
-                    <label className="form-label fw-semibold small">Alamat Email *</label>
+                    <label className="form-label fw-semibold small">Alamat Email Terdaftar *</label>
                     <input
                       type="email"
                       className="form-control bg-light"
@@ -644,6 +1022,7 @@ export const ApplicationWizardPage: React.FC = () => {
                       <option value="S2 / S3">S2 / S3</option>
                     </select>
                   </div>
+
                   <div className="col-md-6">
                     <label className="form-label fw-semibold small">Nama Instansi / Sekolah / Universitas *</label>
                     <input
@@ -655,16 +1034,18 @@ export const ApplicationWizardPage: React.FC = () => {
                       required
                     />
                   </div>
+
                   <div className="col-md-6">
                     <label className="form-label fw-semibold small">Jurusan / Program Studi</label>
                     <input
                       type="text"
                       className="form-control"
-                      placeholder="Contoh: Teknik Informatika"
+                      placeholder="Contoh: Teknik Informatika / Ilmu Komputer"
                       value={major}
                       onChange={(e) => setMajor(e.target.value)}
                     />
                   </div>
+
                   <div className="col-md-3">
                     <label className="form-label fw-semibold small">Tahun Lulus</label>
                     <input
@@ -676,6 +1057,7 @@ export const ApplicationWizardPage: React.FC = () => {
                       onChange={(e) => setGraduationYear(Number(e.target.value))}
                     />
                   </div>
+
                   <div className="col-md-3">
                     <label className="form-label fw-semibold small">Pekerjaan Saat Ini</label>
                     <input
@@ -690,62 +1072,181 @@ export const ApplicationWizardPage: React.FC = () => {
               </div>
             )}
 
-            {/* ── STEP 3: UNGGAH DOKUMEN ──────────────────────── */}
+            {/* ── STEP 3: UNGGAH DOKUMEN PERSYARATAN ───────────── */}
             {currentStep === 3 && (
               <div>
-                <h6 className="fw-bold mb-3 text-primary">
+                <h6 className="fw-bold mb-2 text-primary">
                   <i className="bi bi-file-earmark-arrow-up me-2"></i>Bagian 3: Unggah Dokumen Persyaratan
                 </h6>
                 <p className="text-muted small mb-4">
-                  Pastikan dokumen diunggah dalam format resmi (PDF / JPG / PNG, ukuran maksimal 2MB per file).
+                  Pastikan dokumen asli dalam format resmi (<strong>PDF / JPG / PNG</strong>) dengan ukuran berkas maksimal <strong>2MB</strong>.
+                  Setiap berkas akan dipindai secara otomatis menggunakan <em>ClamAV Antivirus</em> sebelum diterima sistem.
                 </p>
 
                 <div className="row g-4">
-                  {(programRequirements.length > 0 ? programRequirements : [
-                    { requirementTypeId: 'ktp', code: 'KTP', name: 'Kartu Tanda Penduduk (KTP)', isRequired: true },
-                    { requirementTypeId: 'kk', code: 'KK', name: 'Kartu Keluarga (KK)', isRequired: true },
-                    { requirementTypeId: 'ijazah', code: 'IJAZAH', name: 'Ijazah Terakhir / SKL', isRequired: true },
-                    { requirementTypeId: 'komitmen', code: 'SURAT_KOMITMEN', name: 'Surat Pernyataan Komitmen', isRequired: false }
-                  ]).map((req) => (
-                    <div className="col-md-6" key={req.requirementTypeId || req.code}>
-                      <div className="card border p-3 h-100 bg-white">
-                        <div className="d-flex justify-content-between align-items-center mb-2">
-                          <strong className="text-dark">{req.name}</strong>
-                          <span className={`badge ${req.isRequired ? 'bg-danger' : 'bg-secondary'}`}>
-                            {req.isRequired ? 'Wajib' : 'Opsional'}
-                          </span>
+                  {activeRequirements.map((req: any) => {
+                    const code = req.code || req.requirementTypeCode || req.requirement_type_code;
+                    const isMandatory = req.isRequired || req.isMandatory || req.is_mandatory || req.is_required;
+                    const doc = uploadedDocs[code];
+                    const upState = uploadingDoc[code];
+                    const isUploading = upState && (upState.status === 'reserving' || upState.status === 'uploading' || upState.status === 'scanning');
+
+                    return (
+                      <div className="col-md-6" key={req.requirementTypeId || code}>
+                        <div className={`card h-100 border transition ${doc?.isClean ? 'border-success bg-success-subtle bg-opacity-10' : 'bg-white'}`}>
+                          <div className="card-body p-3">
+                            <div className="d-flex justify-content-between align-items-start mb-2">
+                              <div>
+                                <strong className="text-dark d-block">{req.name}</strong>
+                                {req.description && (
+                                  <small className="text-muted d-block" style={{ fontSize: '0.75rem' }}>{req.description}</small>
+                                )}
+                              </div>
+                              <span className={`badge ${isMandatory ? 'bg-danger' : 'bg-secondary'}`}>
+                                {isMandatory ? 'Wajib' : 'Opsional'}
+                              </span>
+                            </div>
+
+                            {/* Case A: Already Uploaded and Clean */}
+                            {doc?.isClean ? (
+                              <div className="p-2 border border-success-subtle rounded bg-white mt-2">
+                                <div className="d-flex align-items-center justify-content-between mb-1">
+                                  <div className="d-flex align-items-center gap-2 overflow-hidden">
+                                    <i className="bi bi-file-earmark-check-fill text-success fs-4"></i>
+                                    <div className="text-truncate">
+                                      <strong className="small d-block text-truncate">{doc.originalFilename}</strong>
+                                      <span className="text-muted" style={{ fontSize: '0.75rem' }}>
+                                        {formatBytes(doc.fileSize)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                  <span className="badge bg-success-subtle text-success border border-success-subtle rounded-pill">
+                                    <i className="bi bi-shield-check me-1"></i> Clean
+                                  </span>
+                                </div>
+
+                                <div className="d-flex justify-content-end gap-2 mt-2 pt-1 border-top">
+                                  <label className="btn btn-outline-secondary btn-sm py-0 px-2 small" style={{ cursor: 'pointer', fontSize: '0.75rem' }}>
+                                    <i className="bi bi-arrow-repeat me-1"></i>Ganti Berkas
+                                    <input
+                                      type="file"
+                                      className="d-none"
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      disabled={isUploading}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) {
+                                          handleFileUpload(code, e.target.files[0]);
+                                        }
+                                      }}
+                                    />
+                                  </label>
+                                </div>
+                              </div>
+                            ) : (
+                              /* Case B: File Input / Upload Action */
+                              <div className="mt-2">
+                                {isUploading ? (
+                                  <div className="p-3 border rounded bg-light text-center">
+                                    <div className="spinner-border spinner-border-sm text-primary mb-2" role="status"></div>
+                                    <div className="small fw-semibold text-primary">{upState?.message || 'Memproses berkas...'}</div>
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <input
+                                      type="file"
+                                      className="form-control form-control-sm mb-1"
+                                      accept=".pdf,.jpg,.jpeg,.png"
+                                      disabled={isSaving}
+                                      onChange={(e) => {
+                                        if (e.target.files?.[0]) {
+                                          handleFileUpload(code, e.target.files[0]);
+                                        }
+                                      }}
+                                    />
+                                    <div className="d-flex justify-content-between align-items-center text-muted" style={{ fontSize: '0.75rem' }}>
+                                      <span>Format: PDF, JPG, PNG</span>
+                                      <span>Maks. 2MB</span>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {upState?.status === 'error' && (
+                                  <div className="alert alert-danger py-1 px-2 mt-2 mb-0 small" style={{ fontSize: '0.75rem' }}>
+                                    <i className="bi bi-exclamation-octagon-fill me-1"></i>{upState.message}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <input
-                          type="file"
-                          className="form-control mb-1"
-                          accept=".pdf,.jpg,.jpeg,.png"
-                        />
-                        <small className="text-muted">
-                          Format: PDF, JPG, PNG (Maks 2MB)
-                        </small>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
 
-            {/* ── STEP 4: PERSETUJUAN & SUBMIT ────────────────── */}
+            {/* ── STEP 4: PERSETUJUAN & RINGKASAN DATA ────────── */}
             {currentStep === 4 && (
               <div>
                 <h6 className="fw-bold mb-3 text-primary">
-                  <i className="bi bi-shield-check me-2"></i>Bagian 4: Lembar Persetujuan &amp; Pernyataan Keabsahan Data
+                  <i className="bi bi-shield-check me-2"></i>Bagian 4: Ringkasan &amp; Pernyataan Keabsahan Data
                 </h6>
-                <div className="alert alert-light border p-3 mb-4">
-                  <h6 className="fw-bold mb-2">Pemberitahuan Penting:</h6>
-                  <p className="small text-muted mb-0">
-                    Pastikan Anda telah memeriksa kembali seluruh isian pada Step 1 hingga Step 3 sebelum
-                    melakukan konfirmasi. Setelah permohonan dikirimkan secara final, data Anda akan diverifikasi
-                    oleh tim administrator.
-                  </p>
+
+                {/* Summary Card */}
+                <div className="card border bg-light mb-4">
+                  <div className="card-header bg-white py-2 border-bottom">
+                    <strong className="small text-secondary">Periksa Kembali Rincian Pendaftaran Anda</strong>
+                  </div>
+                  <div className="card-body p-3 small">
+                    <div className="row g-3">
+                      <div className="col-md-6">
+                        <span className="text-muted d-block">Program Beasiswa:</span>
+                        <strong>{programName}</strong>
+                      </div>
+                      <div className="col-md-6">
+                        <span className="text-muted d-block">Nama Lengkap &amp; NIK:</span>
+                        <strong>{fullName}</strong> ({nik})
+                      </div>
+                      <div className="col-md-6">
+                        <span className="text-muted d-block">Tempat, Tanggal Lahir:</span>
+                        <span>{birthPlace}, {birthDate} ({gender === 'MALE' ? 'Laki-laki' : 'Perempuan'})</span>
+                      </div>
+                      <div className="col-md-6">
+                        <span className="text-muted d-block">Kontak (HP &amp; Email):</span>
+                        <span>{phoneNumber} | {email}</span>
+                      </div>
+                      <div className="col-12">
+                        <span className="text-muted d-block">Alamat Domisili:</span>
+                        <span>{address}, {villageName}, {districtName}, {regencyName}, {provinceName}</span>
+                      </div>
+                      <div className="col-12">
+                        <span className="text-muted d-block">Pendidikan Terakhir:</span>
+                        <span>{educationLevel} — {institutionName} {major ? `(${major})` : ''} — Lulus {graduationYear}</span>
+                      </div>
+                    </div>
+
+                    <hr className="my-3" />
+
+                    <span className="text-muted d-block mb-2">Dokumen Terunggah ({Object.keys(uploadedDocs).length} berkas):</span>
+                    <div className="row g-2">
+                      {Object.entries(uploadedDocs).map(([code, doc]) => (
+                        <div className="col-md-6" key={code}>
+                          <div className="p-2 border rounded bg-white d-flex align-items-center justify-content-between">
+                            <span className="text-truncate me-2">
+                              <i className="bi bi-file-earmark-check text-success me-1"></i>
+                              <strong>{code}:</strong> {doc.originalFilename}
+                            </span>
+                            <span className="badge bg-success-subtle text-success">Clean</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
 
-                <div className="form-check p-3 bg-white border rounded">
+                {/* Consent Checkbox */}
+                <div className="form-check p-3 bg-white border rounded shadow-sm">
                   <input
                     className="form-check-input ms-0 me-2"
                     type="checkbox"
@@ -754,10 +1255,10 @@ export const ApplicationWizardPage: React.FC = () => {
                     onChange={(e) => setAgreed(e.target.checked)}
                     required
                   />
-                  <label className="form-check-label small fw-semibold" htmlFor="checkSah">
+                  <label className="form-check-label small fw-semibold" htmlFor="checkSah" style={{ cursor: 'pointer' }}>
                     Saya menyatakan dengan sesungguhnya bahwa seluruh data dan dokumen yang saya unggah adalah
-                    benar, sah, dan milik saya pribadi. Apabila di kemudian hari ditemukan data tidak benar,
-                    saya bersedia menerima sanksi pembatalan kepesertaan.
+                    benar, sah, dan milik saya pribadi. Apabila di kemudian hari ditemukan data tidak benar atau palsu,
+                    saya bersedia menerima sanksi pembatalan kepesertaan dan diproses sesuai ketentuan hukum yang berlaku.
                   </label>
                 </div>
               </div>
@@ -770,7 +1271,7 @@ export const ApplicationWizardPage: React.FC = () => {
               type="button"
               className="btn btn-secondary"
               onClick={handlePrev}
-              disabled={currentStep === 1 || isSaving}
+              disabled={currentStep === 1 || isSaving || isSubmitting}
             >
               <i className="bi bi-arrow-left me-1"></i> Kembali
             </button>
@@ -780,7 +1281,7 @@ export const ApplicationWizardPage: React.FC = () => {
                 type="button"
                 className="btn btn-outline-primary"
                 onClick={handleSaveDraftOnly}
-                disabled={isSaving}
+                disabled={isSaving || isSubmitting}
               >
                 {isSaving ? (
                   <>
@@ -797,32 +1298,83 @@ export const ApplicationWizardPage: React.FC = () => {
               {currentStep < 4 ? (
                 <button
                   type="button"
-                  className="btn btn-primary fw-semibold"
+                  className="btn btn-primary fw-semibold px-4"
                   onClick={handleNext}
-                  disabled={isSaving}
+                  disabled={isSaving || isSubmitting}
                 >
                   Selanjutnya <i className="bi bi-arrow-right ms-1"></i>
                 </button>
               ) : (
                 <button
                   type="button"
-                  className="btn btn-success fw-semibold"
-                  onClick={async () => {
-                    const ok = await saveStep4();
-                    if (ok) {
-                      alert('Draft permohonan pendaftaran Anda berhasil disiapkan secara lengkap!');
-                      navigate('/');
-                    }
-                  }}
-                  disabled={!agreed || isSaving}
+                  className="btn btn-success fw-semibold px-4"
+                  onClick={() => setShowSubmitModal(true)}
+                  disabled={!agreed || isSaving || isSubmitting}
                 >
-                  <i className="bi bi-send me-1"></i> Kirim Pendaftaran (Submit)
+                  <i className="bi bi-send-fill me-1"></i> Kirim Pendaftaran (Submit)
                 </button>
               )}
             </div>
           </div>
         </div>
       </div>
+
+      {/* ── Modal Konfirmasi Submit Final (AT-08) ─────────────── */}
+      {showSubmitModal && (
+        <div className="modal fade show d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow-lg">
+              <div className="modal-header bg-primary text-white">
+                <h5 className="modal-title fw-bold">
+                  <i className="bi bi-send-check me-2"></i>Konfirmasi Pengiriman Pendaftaran
+                </h5>
+                <button
+                  type="button"
+                  className="btn-close btn-close-white"
+                  onClick={() => setShowSubmitModal(false)}
+                  disabled={isSubmitting}
+                ></button>
+              </div>
+              <div className="modal-body p-4">
+                <p className="mb-3">
+                  Apakah Anda yakin seluruh data diri, riwayat pendidikan, dan berkas persyaratan yang Anda unggah telah <strong>benar, lengkap, dan sah</strong>?
+                </p>
+                <div className="alert alert-warning py-2 px-3 small mb-0">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  <strong>Perhatian:</strong> Setelah dikirimkan, permohonan Anda akan dikunci (status <strong>SUBMITTED</strong>) dan langsung diteruskan ke tim verifikator seleksi administrasi.
+                </div>
+              </div>
+              <div className="modal-footer bg-light border-top p-3">
+                <button
+                  type="button"
+                  className="btn btn-outline-secondary"
+                  onClick={() => setShowSubmitModal(false)}
+                  disabled={isSubmitting}
+                >
+                  Periksa Kembali
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-success fw-semibold"
+                  onClick={handleFinalSubmit}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                      Mengirimkan...
+                    </>
+                  ) : (
+                    <>
+                      <i className="bi bi-check2-circle me-1"></i> Ya, Kirim Sekarang
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

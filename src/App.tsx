@@ -6,6 +6,8 @@ import { InternalLoginPage } from './pages/InternalLoginPage';
 import { AdminPage } from './pages/AdminPage';
 import { ApplicationWizardPage } from './pages/ApplicationWizardPage';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
+import { VerifikatorPage } from './pages/VerifikatorPage';
+import { WawancaraPage } from './pages/WawancaraPage';
 
 export default function App() {
   return (
@@ -33,17 +35,7 @@ export default function App() {
             path="/verifikator"
             element={
               <ProtectedRoute allowedRoles={['VERIFIKATOR', 'ADMIN']}>
-                <div className="container py-5">
-                  <div className="card shadow-sm border-0">
-                    <div className="card-body p-4 text-center">
-                      <h3 className="fw-bold text-primary">Workspace Verifikator Administrasi</h3>
-                      <p className="text-muted">Fitur seleksi administrasi berkas (Fase 6)</p>
-                      <a href="/" className="btn btn-outline-primary mt-2">
-                        Kembali ke Beranda
-                      </a>
-                    </div>
-                  </div>
-                </div>
+                <VerifikatorPage />
               </ProtectedRoute>
             }
           />
@@ -53,17 +45,7 @@ export default function App() {
             path="/wawancara"
             element={
               <ProtectedRoute allowedRoles={['LEMBAGA_SELEKSI', 'ADMIN']}>
-                <div className="container py-5">
-                  <div className="card shadow-sm border-0">
-                    <div className="card-body p-4 text-center">
-                      <h3 className="fw-bold text-primary">Workspace Lembaga Seleksi (Wawancara)</h3>
-                      <p className="text-muted">Fitur penilaian dan input skor wawancara (Fase 7)</p>
-                      <a href="/" className="btn btn-outline-primary mt-2">
-                        Kembali ke Beranda
-                      </a>
-                    </div>
-                  </div>
-                </div>
+                <WawancaraPage />
               </ProtectedRoute>
             }
           />

@@ -44,10 +44,12 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     const initAuth = async () => {
       try {
         const res = await api.post('/api/v1/auth/refresh', {}, { skipAuth: true });
-        if (res?.accessToken && res?.user) {
-          setAccessToken(res.accessToken);
-          setAccessTokenState(res.accessToken);
-          setUser(res.user);
+        const token = res?.data?.accessToken || res?.accessToken;
+        const u = res?.data?.user || res?.user;
+        if (token && u) {
+          setAccessToken(token);
+          setAccessTokenState(token);
+          setUser(u);
         }
       } catch (err) {
         // No active session cookie, ignore
@@ -61,15 +63,20 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const login = async (identifier: string, password: string): Promise<UserProfile> => {
     const res = await api.post('/api/v1/auth/login', { identifier, password }, { skipAuth: true });
-    setAccessToken(res.accessToken);
-    setAccessTokenState(res.accessToken);
-    setUser(res.user);
-    return res.user;
+    const token = res?.data?.accessToken || res?.accessToken;
+    const u = res?.data?.user || res?.user;
+    if (!token || !u) {
+      throw new Error('Gagal memproses kredensial pengguna');
+    }
+    setAccessToken(token);
+    setAccessTokenState(token);
+    setUser(u);
+    return u;
   };
 
   const register = async (nik: string, fullName: string, email: string) => {
     const res = await api.post('/api/v1/auth/register', { nik, fullName, email }, { skipAuth: true });
-    return res;
+    return res?.data || res;
   };
 
   const logout = async () => {
