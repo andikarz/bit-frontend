@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { api } from '../services/api';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
@@ -33,6 +33,14 @@ export const ApplicationWizardPage: React.FC = () => {
   const [applicationId, setApplicationId] = useState<string | null>(null);
   const [registrationCode, setRegistrationCode] = useState<string | null>(null);
   const [submissionStatus, setSubmissionStatus] = useState<string>('DRAFT');
+  const [administrationStatus, setAdministrationStatus] = useState<string>('NOT_STARTED');
+  const [interviewStatus, setInterviewStatus] = useState<string>('NOT_ELIGIBLE');
+  const [finalStatus, setFinalStatus] = useState<string>('UNDECIDED');
+  const [confirmationStatus, setConfirmationStatus] = useState<string>('NOT_AVAILABLE');
+  const [reviewData, setReviewData] = useState<any>(null);
+  const [interviewScoreData, setInterviewScoreData] = useState<any>(null);
+  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
+  const [isEditingRevision, setIsEditingRevision] = useState(false);
   const [submittedAt, setSubmittedAt] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<number>(1);
   const [programName, setProgramName] = useState('Pelatihan Beasiswa');
@@ -122,9 +130,15 @@ export const ApplicationWizardPage: React.FC = () => {
           setApplicationId(appData.id);
           setRegistrationCode(appData.registrationCode);
           setSubmissionStatus(appData.submissionStatus || 'DRAFT');
+          setAdministrationStatus(appData.administrationStatus || 'NOT_STARTED');
+          setInterviewStatus(appData.interviewStatus || 'NOT_ELIGIBLE');
+          setFinalStatus(appData.finalStatus || 'UNDECIDED');
+          setConfirmationStatus(appData.confirmationStatus || 'NOT_AVAILABLE');
           setSubmittedAt(appData.submittedAt || null);
           setAppVersion(appData.version || 1);
           setCurrentStep(appData.currentStep || 1);
+          if (appData.review) setReviewData(appData.review);
+          if (appData.interviewScore) setInterviewScoreData(appData.interviewScore);
 
           if (appData.programSnapshot) {
             setProgramName(appData.programSnapshot.name || 'Pelatihan Beasiswa');
@@ -162,8 +176,8 @@ export const ApplicationWizardPage: React.FC = () => {
               const code = d.requirement_type_code || d.requirementTypeCode;
               if (code) {
                 docsMap[code] = {
-                  documentId: d.document_id || d.documentId,
-                  originalFilename: d.original_filename || d.originalFilename || 'Dokumen Terunggah',
+                  documentId: d.document_id || d.documentId || d.id,
+                  originalFilename: d.original_filename || d.originalFilename || 'document.pdf',
                   fileSize: Number(d.file_size || d.fileSize || 0),
                   mimeType: d.mime_type || d.mimeType || 'application/pdf',
                   isClean: Boolean(d.is_clean ?? d.isClean),
@@ -188,6 +202,46 @@ export const ApplicationWizardPage: React.FC = () => {
 
     initApplication();
   }, [targetProgramId, user]);
+
+  // Refresh application status on demand
+  const refreshStatus = useCallback(async (showFeedback = false) => {
+    try {
+      setIsRefreshingStatus(true);
+      const res = await api.get('/api/v1/applications/my-active');
+      if (res.data) {
+        const d = res.data;
+        setApplicationId(d.id);
+        setRegistrationCode(d.registrationCode);
+        setSubmissionStatus(d.submissionStatus || 'DRAFT');
+        setAdministrationStatus(d.administrationStatus || 'NOT_STARTED');
+        setInterviewStatus(d.interviewStatus || 'NOT_ELIGIBLE');
+        setFinalStatus(d.finalStatus || 'UNDECIDED');
+        setConfirmationStatus(d.confirmationStatus || 'NOT_AVAILABLE');
+        setSubmittedAt(d.submittedAt || null);
+        setAppVersion(d.version || 1);
+        if (d.review) setReviewData(d.review);
+        if (d.interviewScore) setInterviewScoreData(d.interviewScore);
+        if (showFeedback) {
+          setSaveSuccess('Status permohonan berhasil diperbarui!');
+          setTimeout(() => setSaveSuccess(null), 3000);
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to refresh application status:', err);
+    } finally {
+      setIsRefreshingStatus(false);
+    }
+  }, []);
+
+  // Periodic polling for status updates every 15 seconds after submission
+  useEffect(() => {
+    if (submissionStatus !== 'DRAFT') {
+      const interval = setInterval(() => {
+        refreshStatus(false);
+      }, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [submissionStatus, refreshStatus]);
 
   // 2. Load provinces
   useEffect(() => {
@@ -435,12 +489,36 @@ export const ApplicationWizardPage: React.FC = () => {
         setRegistrationCode(res.data.registrationCode);
       }
       setSubmissionStatus('SUBMITTED');
+      setAdministrationStatus('PENDING');
+      setInterviewStatus('NOT_ELIGIBLE');
+      setFinalStatus('UNDECIDED');
       setSubmittedAt(new Date().toISOString());
       setShowSubmitModal(false);
       setSaveSuccess('Pendaftaran beasiswa Anda berhasil dikirimkan dan masuk ke tahap verifikasi berkas!');
     } catch (err: any) {
       setShowSubmitModal(false);
       setSaveError(err.message || 'Gagal mengirimkan pendaftaran');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // ── Resubmit handler for revisions (Fase 6) ─────────────────
+  const handleResubmit = async () => {
+    if (!applicationId) return;
+    setIsSubmitting(true);
+    setSaveError(null);
+    try {
+      const res = await api.post(`/api/v1/applications/${applicationId}/resubmit`, {
+        expectedVersion: appVersion
+      });
+      setSubmissionStatus('RESUBMITTED');
+      setAdministrationStatus('PENDING');
+      if (res.data?.version) setAppVersion(res.data.version);
+      setIsEditingRevision(false);
+      setSaveSuccess('Permohonan perbaikan berhasil dikirimkan ulang (Resubmitted) dan masuk antrean verifikasi berkas!');
+    } catch (err: any) {
+      setSaveError(err.message || 'Gagal mengirim ulang permohonan');
     } finally {
       setIsSubmitting(false);
     }
@@ -528,9 +606,25 @@ export const ApplicationWizardPage: React.FC = () => {
   // VIEW: POST-SUBMISSION CONFIRMATION DASHBOARD
   // (Sesuai Mockup Calon Pendaftar/3_index_setelah_daftar.html)
   // ══════════════════════════════════════════════════════════════
-  if (submissionStatus === 'SUBMITTED' || submissionStatus === 'RESUBMITTED') {
+  if (submissionStatus !== 'DRAFT' && !isEditingRevision) {
+    const isAccepted = finalStatus === 'ACCEPTED' || interviewStatus === 'PASSED';
+    const isRejected = finalStatus === 'NOT_ACCEPTED' || interviewStatus === 'FAILED' || administrationStatus === 'REJECTED';
+    const isPassedAdmin = administrationStatus === 'PASSED' && !isAccepted && !isRejected;
+    const isRevision = administrationStatus === 'REVISION' || submissionStatus === 'REVISION_REQUIRED';
+    const isPending = !isAccepted && !isRejected && !isPassedAdmin && !isRevision;
+
     return (
       <div className="bg-light min-vh-100 pb-5">
+        <style>{`
+          @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+          }
+          .spin-animation {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+          }
+        `}</style>
         {/* Navigation Bar */}
         <nav className="navbar navbar-expand-lg navbar-dark bg-primary sticky-top shadow-sm">
           <div className="container">
@@ -543,6 +637,7 @@ export const ApplicationWizardPage: React.FC = () => {
               </button>
               <ul className="dropdown-menu dropdown-menu-end shadow border-0">
                 <li><Link className="dropdown-item" to="/"><i className="bi bi-house me-2"></i>Beranda</Link></li>
+                <li><button className="dropdown-item" onClick={() => refreshStatus(true)}><i className="bi bi-arrow-clockwise me-2"></i>Perbarui Status</button></li>
                 <li><hr className="dropdown-divider" /></li>
                 <li><button className="dropdown-item text-danger" onClick={() => logout()}><i className="bi bi-box-arrow-right me-2"></i>Keluar</button></li>
               </ul>
@@ -550,49 +645,350 @@ export const ApplicationWizardPage: React.FC = () => {
           </div>
         </nav>
 
-        <div className="container py-5" style={{ maxWidth: '900px' }}>
-          {/* Status Header Banner */}
-          <div className="card shadow-sm border-0 mb-4 overflow-hidden">
-            <div className="card-body p-4 text-center bg-white">
-              <div className="d-inline-flex align-items-center justify-content-center bg-success-subtle text-success rounded-circle mb-3" style={{ width: '72px', height: '72px' }}>
-                <i className="bi bi-check2-circle fs-1"></i>
-              </div>
-              <h3 className="fw-bold text-dark mb-1">Pendaftaran Beasiswa Berhasil Dikirim!</h3>
-              <p className="text-muted mb-3">
-                Permohonan Anda telah tersimpan secara resmi dan saat ini sedang menunggu antrean verifikasi berkas administrasi.
-              </p>
-
-              {/* Registration Code Badge */}
-              <div className="d-inline-flex align-items-center gap-2 bg-light border rounded-pill px-4 py-2 mb-3">
-                <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
-                <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
-                <button
-                  className="btn btn-sm btn-outline-primary border-0 rounded-circle"
-                  title="Salin Nomor Registrasi"
-                  onClick={copyRegistrationCode}
-                >
-                  <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
-                </button>
-              </div>
-              {copiedCode && <div className="text-success small fw-semibold">Nomor registrasi berhasil disalin!</div>}
-
-              <div className="d-flex justify-content-center gap-2 mt-2">
-                <span className="badge bg-primary px-3 py-2 fs-6 fw-semibold">
-                  <i className="bi bi-shield-check me-1"></i> Status: SUBMITTED
-                </span>
-                <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-semibold">
-                  <i className="bi bi-hourglass-split me-1"></i> Administrasi: PENDING
-                </span>
-              </div>
-              {submittedAt && (
-                <div className="text-muted small mt-2">
-                  <i className="bi bi-clock me-1"></i> Dikirim pada: {new Date(submittedAt).toLocaleString('id-ID')}
-                </div>
-              )}
+        <div className="container py-4" style={{ maxWidth: '900px' }}>
+          {/* Top Bar with Refresh & Notice */}
+          <div className="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+            <div>
+              <span className="badge bg-white text-secondary border shadow-sm px-3 py-2">
+                <i className="bi bi-person-badge me-1 text-primary"></i> Portal Status &amp; Pengumuman Peserta
+              </span>
             </div>
+            <button
+              className="btn btn-sm btn-outline-primary bg-white shadow-sm d-flex align-items-center gap-2 fw-semibold px-3 py-1"
+              onClick={() => refreshStatus(true)}
+              disabled={isRefreshingStatus}
+            >
+              <i className={`bi bi-arrow-clockwise ${isRefreshingStatus ? 'spin-animation' : ''}`}></i>
+              {isRefreshingStatus ? 'Memperbarui...' : 'Perbarui Status'}
+            </button>
           </div>
 
-          {/* Timeline Tahapan Seleksi */}
+          {/* Dynamic Alert Messages */}
+          {saveSuccess && (
+            <div className="alert alert-success alert-dismissible fade show shadow-sm mb-3" role="alert">
+              <i className="bi bi-check-circle-fill me-2"></i>{saveSuccess}
+              <button type="button" className="btn-close" onClick={() => setSaveSuccess(null)}></button>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* DYNAMIC HEADER BANNER (BY SELECTION OUTCOME) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+
+          {/* CASE A: LULUS & DITERIMA (FINAL ACCEPTED) */}
+          {isAccepted && (
+            <div className="card shadow-lg border-0 mb-4 overflow-hidden" style={{ background: 'linear-gradient(135deg, #047857 0%, #059669 50%, #10b981 100%)', color: '#fff' }}>
+              <div className="card-body p-4 p-md-5 text-center position-relative">
+                <div className="d-inline-flex align-items-center justify-content-center bg-white text-warning rounded-circle mb-3 shadow" style={{ width: '88px', height: '88px' }}>
+                  <i className="bi bi-trophy-fill fs-1 text-warning"></i>
+                </div>
+                <div className="mb-2">
+                  <span className="badge bg-warning text-dark px-3 py-1 fw-bold text-uppercase">
+                    <i className="bi bi-patch-check-fill me-1"></i> Pengumuman Kelulusan Akhir Resmi
+                  </span>
+                </div>
+                <h2 className="fw-bold mb-2 text-white">🎉 SELAMAT! ANDA DINYATAKAN LULUS &amp; DITERIMA!</h2>
+                <p className="lead mb-3 text-white-50" style={{ maxWidth: '720px', margin: '0 auto' }}>
+                  Selamat kepada <strong className="text-white">{fullName || user?.fullName}</strong>! Permohonan beasiswa Anda pada program <strong>{programName}</strong> telah berhasil menyelesaikan seluruh rangkaian seleksi dan resmi dinyatakan <strong>DITERIMA</strong> sebagai Penerima Beasiswa.
+                </p>
+
+                {/* Registration Code Badge */}
+                <div className="d-inline-flex align-items-center gap-2 bg-white bg-opacity-10 border border-white border-opacity-25 rounded-pill px-4 py-2 mb-3">
+                  <span className="small text-white-50 fw-semibold">Nomor Registrasi:</span>
+                  <span className="fs-5 fw-bold font-monospace text-warning">{registrationCode}</span>
+                  <button
+                    className="btn btn-sm btn-link text-white p-0 border-0"
+                    title="Salin Nomor Registrasi"
+                    onClick={copyRegistrationCode}
+                  >
+                    <i className={`bi ${copiedCode ? 'bi-check-lg text-warning' : 'bi-clipboard'}`}></i>
+                  </button>
+                </div>
+                {copiedCode && <div className="text-warning small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
+
+                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
+                  <span className="badge bg-white text-success px-3 py-2 fs-6 fw-bold shadow-sm">
+                    <i className="bi bi-patch-check-fill me-1"></i> Keputusan: DITERIMA (ACCEPTED)
+                  </span>
+                  <span className="badge bg-success-subtle text-white border border-white border-opacity-50 px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-shield-check me-1"></i> Administrasi: LOLOS (PASSED)
+                  </span>
+                  <span className="badge bg-success-subtle text-white border border-white border-opacity-50 px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-chat-check-fill me-1"></i> Wawancara: LULUS (PASSED)
+                  </span>
+                </div>
+                {submittedAt && (
+                  <div className="text-white-50 small mt-3">
+                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* CASE B: TIDAK LOLOS / GAGAL */}
+          {isRejected && (
+            <div className="card shadow-sm border-danger border-2 mb-4 overflow-hidden bg-danger-subtle">
+              <div className="card-body p-4 p-md-5 text-center">
+                <div className="d-inline-flex align-items-center justify-content-center bg-danger text-white rounded-circle mb-3 shadow" style={{ width: '80px', height: '80px' }}>
+                  <i className="bi bi-x-lg fs-1"></i>
+                </div>
+                <div className="mb-2">
+                  <span className="badge bg-danger px-3 py-1 fw-bold text-uppercase">
+                    Pengumuman Hasil Seleksi
+                  </span>
+                </div>
+                <h3 className="fw-bold text-danger mb-2">Mohon Maaf, Anda Belum Lolos Seleksi</h3>
+                <p className="text-muted mb-3" style={{ maxWidth: '680px', margin: '0 auto' }}>
+                  {administrationStatus === 'REJECTED'
+                    ? 'Berkas administrasi dan dokumen yang diunggah belum memenuhi persyaratan kualifikasi program beasiswa ini.'
+                    : interviewStatus === 'FAILED'
+                    ? 'Berdasarkan evaluasi wawancara oleh Lembaga Seleksi, hasil penilaian belum mencapai nilai standar kelulusan (passing grade).'
+                    : 'Permohonan beasiswa Anda pada program ini belum dapat diloloskan pada periode seleksi saat ini.'}
+                </p>
+
+                {/* Registration Code Badge */}
+                <div className="d-inline-flex align-items-center gap-2 bg-white border rounded-pill px-4 py-2 mb-3">
+                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
+                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
+                  <button
+                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
+                    title="Salin Nomor Registrasi"
+                    onClick={copyRegistrationCode}
+                  >
+                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
+                  </button>
+                </div>
+                {copiedCode && <div className="text-success small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
+
+                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
+                  <span className="badge bg-danger px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-x-circle me-1"></i> Status: TIDAK DITERIMA
+                  </span>
+                  <span className={`badge ${administrationStatus === 'PASSED' ? 'bg-success' : 'bg-secondary'} px-3 py-2 fs-6 fw-semibold`}>
+                    <i className="bi bi-file-earmark-text me-1"></i> Administrasi: {administrationStatus === 'PASSED' ? 'LOLOS' : 'DITOLAK'}
+                  </span>
+                  {interviewStatus !== 'NOT_ELIGIBLE' && (
+                    <span className="badge bg-danger px-3 py-2 fs-6 fw-semibold">
+                      <i className="bi bi-chat-left-dots me-1"></i> Wawancara: TIDAK LULUS
+                    </span>
+                  )}
+                </div>
+                {submittedAt && (
+                  <div className="text-muted small mt-2">
+                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* CASE C: LOLOS ADMINISTRASI & MENUNGGU WAWANCARA */}
+          {isPassedAdmin && (
+            <div className="card shadow border-0 mb-4 overflow-hidden" style={{ background: 'linear-gradient(135deg, #1e40af 0%, #2563eb 60%, #0ea5e9 100%)', color: '#fff' }}>
+              <div className="card-body p-4 p-md-5 text-center">
+                <div className="d-inline-flex align-items-center justify-content-center bg-white text-primary rounded-circle mb-3 shadow-lg" style={{ width: '80px', height: '80px' }}>
+                  <i className="bi bi-stars fs-1 text-primary"></i>
+                </div>
+                <div className="mb-2">
+                  <span className="badge bg-success px-3 py-1 fw-bold text-uppercase">
+                    <i className="bi bi-check-circle-fill me-1"></i> Tahap 1 Administrasi Selesai
+                  </span>
+                </div>
+                <h3 className="fw-bold mb-2 text-white">🎉 Selamat! Anda Dinyatakan LOLOS Seleksi Administrasi!</h3>
+                <p className="lead mb-3 text-white-50" style={{ maxWidth: '720px', margin: '0 auto' }}>
+                  Berkas administrasi dan dokumen persyaratan Anda telah diverifikasi oleh tim verifikator dan dinyatakan <strong>LENGKAP &amp; SESUAI</strong>. Permohonan Anda saat ini berhak dan telah dialihkan ke tahapan <strong>Seleksi Wawancara</strong>.
+                </p>
+
+                {/* Registration Code Badge */}
+                <div className="d-inline-flex align-items-center gap-2 bg-white bg-opacity-10 border border-white border-opacity-25 rounded-pill px-4 py-2 mb-3">
+                  <span className="small text-white-50 fw-semibold">Nomor Registrasi:</span>
+                  <span className="fs-5 fw-bold font-monospace text-warning">{registrationCode}</span>
+                  <button
+                    className="btn btn-sm btn-link text-white p-0 border-0"
+                    title="Salin Nomor Registrasi"
+                    onClick={copyRegistrationCode}
+                  >
+                    <i className={`bi ${copiedCode ? 'bi-check-lg text-warning' : 'bi-clipboard'}`}></i>
+                  </button>
+                </div>
+                {copiedCode && <div className="text-warning small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
+
+                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
+                  <span className="badge bg-success px-3 py-2 fs-6 fw-bold shadow-sm">
+                    <i className="bi bi-check2-circle me-1"></i> Administrasi: LOLOS (PASSED)
+                  </span>
+                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-bold shadow-sm">
+                    <i className="bi bi-headset me-1"></i> Wawancara: MENUNGGU JADWAL / PENILAIAN
+                  </span>
+                  <span className="badge bg-white-50 text-white px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-hourglass-split me-1"></i> Keputusan Akhir: PROSES SELEKSI
+                  </span>
+                </div>
+                {submittedAt && (
+                  <div className="text-white-50 small mt-3">
+                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* CASE D: PERBAIKAN BERKAS (REVISI) */}
+          {isRevision && (
+            <div className="card shadow-sm border-warning border-2 mb-4 overflow-hidden bg-warning-subtle">
+              <div className="card-body p-4 text-center">
+                <div className="d-inline-flex align-items-center justify-content-center bg-warning text-dark rounded-circle mb-3 shadow" style={{ width: '80px', height: '80px' }}>
+                  <i className="bi bi-exclamation-triangle-fill fs-1"></i>
+                </div>
+                <h3 className="fw-bold text-dark mb-2">Perhatian: Berkas Permohonan Memerlukan Perbaikan (Revisi)</h3>
+                <p className="text-muted mb-3" style={{ maxWidth: '650px', margin: '0 auto' }}>
+                  Tim verifikator telah memeriksa permohonan Anda dan memerlukan perbaikan atau unggah ulang dokumen sebelum dapat diproses lebih lanjut.
+                </p>
+
+                {/* Registration Code Badge */}
+                <div className="d-inline-flex align-items-center gap-2 bg-white border rounded-pill px-4 py-2 mb-3">
+                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
+                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
+                  <button
+                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
+                    title="Salin Nomor Registrasi"
+                    onClick={copyRegistrationCode}
+                  >
+                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
+                  </button>
+                </div>
+
+                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2 mb-3">
+                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-bold">
+                    <i className="bi bi-exclamation-circle me-1"></i> Administrasi: PERLU REVISI
+                  </span>
+                  <span className="badge bg-secondary px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-clock-history me-1"></i> Status: MENUNGGU PERBAIKAN
+                  </span>
+                </div>
+
+                <button
+                  className="btn btn-warning text-dark fw-bold px-4 py-2 shadow-sm"
+                  onClick={() => {
+                    setCurrentStep(3);
+                    setIsEditingRevision(true);
+                  }}
+                >
+                  <i className="bi bi-pencil-square me-2"></i>Perbaiki Berkas Sekarang
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* CASE E: PENDING VERIFIKASI (DEFAULT SUBMITTED) */}
+          {isPending && (
+            <div className="card shadow-sm border-0 mb-4 overflow-hidden">
+              <div className="card-body p-4 text-center bg-white">
+                <div className="d-inline-flex align-items-center justify-content-center bg-primary-subtle text-primary rounded-circle mb-3" style={{ width: '72px', height: '72px' }}>
+                  <i className="bi bi-hourglass-split fs-1"></i>
+                </div>
+                <h3 className="fw-bold text-dark mb-1">Pendaftaran Beasiswa Berhasil Dikirim!</h3>
+                <p className="text-muted mb-3" style={{ maxWidth: '650px', margin: '0 auto' }}>
+                  Permohonan Anda telah tersimpan secara resmi dan saat ini sedang menunggu antrean verifikasi berkas administrasi oleh tim verifikator.
+                </p>
+
+                {/* Registration Code Badge */}
+                <div className="d-inline-flex align-items-center gap-2 bg-light border rounded-pill px-4 py-2 mb-3">
+                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
+                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
+                  <button
+                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
+                    title="Salin Nomor Registrasi"
+                    onClick={copyRegistrationCode}
+                  >
+                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
+                  </button>
+                </div>
+                {copiedCode && <div className="text-success small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
+
+                <div className="d-flex justify-content-center gap-2 mt-2">
+                  <span className="badge bg-primary px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-shield-check me-1"></i> Status: SUBMITTED
+                  </span>
+                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-semibold">
+                    <i className="bi bi-hourglass-split me-1"></i> Administrasi: DALAM ANTREAN (PENDING)
+                  </span>
+                </div>
+                {submittedAt && (
+                  <div className="text-muted small mt-2">
+                    <i className="bi bi-clock me-1"></i> Dikirim pada: {new Date(submittedAt).toLocaleString('id-ID')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* EVALUATION SCORES & NOTES (IF AVAILABLE) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {interviewScoreData && (
+            <div className="card shadow-sm border-0 mb-4">
+              <div className="card-header bg-white border-bottom py-3 d-flex justify-content-between align-items-center">
+                <h6 className="fw-bold mb-0 text-dark">
+                  <i className="bi bi-clipboard2-data me-2 text-primary"></i>Evaluasi Seleksi Wawancara
+                </h6>
+                <span className={`badge ${interviewScoreData.decision === 'PASSED' ? 'bg-success' : 'bg-danger'} px-3 py-1 fs-6`}>
+                  {interviewScoreData.decision === 'PASSED' ? 'LULUS WAWANCARA' : 'TIDAK LULUS WAWANCARA'}
+                </span>
+              </div>
+              <div className="card-body p-4">
+                <div className="row g-3 text-center mb-3">
+                  <div className="col-6 col-md-3">
+                    <div className="p-3 border rounded bg-light">
+                      <small className="text-muted d-block">Komunikasi &amp; Sikap (30%)</small>
+                      <span className="fs-4 fw-bold text-dark">{interviewScoreData.scoreAspect1 ?? '-'}</span>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className="p-3 border rounded bg-light">
+                      <small className="text-muted d-block">Teknis &amp; Portofolio (40%)</small>
+                      <span className="fs-4 fw-bold text-dark">{interviewScoreData.scoreAspect2 ?? '-'}</span>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className="p-3 border rounded bg-light">
+                      <small className="text-muted d-block">Motivasi &amp; Komitmen (30%)</small>
+                      <span className="fs-4 fw-bold text-dark">{interviewScoreData.scoreAspect3 ?? '-'}</span>
+                    </div>
+                  </div>
+                  <div className="col-6 col-md-3">
+                    <div className={`p-3 border rounded ${interviewScoreData.decision === 'PASSED' ? 'bg-success-subtle border-success text-success' : 'bg-danger-subtle border-danger text-danger'}`}>
+                      <small className="d-block fw-semibold">Total Nilai Wawancara</small>
+                      <span className="fs-3 fw-bold">{interviewScoreData.totalScore != null ? Number(interviewScoreData.totalScore).toFixed(2) : '-'}</span>
+                      <small className="d-block text-muted">dari 100</small>
+                    </div>
+                  </div>
+                </div>
+                {interviewScoreData.notes && (
+                  <div className="p-3 rounded bg-light border">
+                    <strong className="small text-secondary d-block mb-1">
+                      <i className="bi bi-chat-quote me-1"></i> Catatan Evaluasi Tim Pewawancara:
+                    </strong>
+                    <p className="mb-0 text-dark fst-italic">"{interviewScoreData.notes}"</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {reviewData?.generalNotes && (
+            <div className="alert alert-info border shadow-sm mb-4">
+              <h6 className="fw-bold mb-1">
+                <i className="bi bi-info-circle-fill me-2"></i>Catatan Tim Verifikator Administrasi:
+              </h6>
+              <p className="mb-0">{reviewData.generalNotes}</p>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TIMELINE TAHAPAN SELEKSI */}
+          {/* ══════════════════════════════════════════════════════════ */}
           <div className="card shadow-sm border-0 mb-4">
             <div className="card-header bg-white border-bottom py-3">
               <h6 className="fw-bold mb-0 text-dark">
@@ -601,6 +997,7 @@ export const ApplicationWizardPage: React.FC = () => {
             </div>
             <div className="card-body p-4">
               <div className="row g-3 text-center">
+                {/* Step 1: Formulir */}
                 <div className="col-md-3">
                   <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
                     <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
@@ -608,26 +1005,86 @@ export const ApplicationWizardPage: React.FC = () => {
                     <span className="badge bg-success mt-1">Selesai</span>
                   </div>
                 </div>
+
+                {/* Step 2: Verifikasi Berkas */}
                 <div className="col-md-3">
-                  <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
-                    <i className="bi bi-arrow-repeat fs-3 mb-2 d-block text-primary"></i>
-                    <strong className="d-block small">2. Verifikasi Berkas</strong>
-                    <span className="badge bg-primary mt-1">Sedang Berjalan</span>
-                  </div>
+                  {administrationStatus === 'PASSED' ? (
+                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
+                      <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">2. Verifikasi Berkas</strong>
+                      <span className="badge bg-success mt-1">Lolos</span>
+                    </div>
+                  ) : administrationStatus === 'REJECTED' ? (
+                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
+                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">2. Verifikasi Berkas</strong>
+                      <span className="badge bg-danger mt-1">Ditolak</span>
+                    </div>
+                  ) : administrationStatus === 'REVISION' ? (
+                    <div className="p-3 rounded border border-warning bg-warning-subtle text-warning-emphasis h-100">
+                      <i className="bi bi-exclamation-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">2. Verifikasi Berkas</strong>
+                      <span className="badge bg-warning text-dark mt-1">Perlu Revisi</span>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
+                      <i className="bi bi-arrow-repeat fs-3 mb-2 d-block text-primary spin-animation"></i>
+                      <strong className="d-block small">2. Verifikasi Berkas</strong>
+                      <span className="badge bg-primary mt-1">Sedang Berjalan</span>
+                    </div>
+                  )}
                 </div>
+
+                {/* Step 3: Wawancara */}
                 <div className="col-md-3">
-                  <div className="p-3 rounded border bg-light text-muted h-100">
-                    <i className="bi bi-chat-left-dots fs-3 mb-2 d-block"></i>
-                    <strong className="d-block small">3. Seleksi Wawancara</strong>
-                    <span className="badge bg-secondary mt-1">Akan Datang</span>
-                  </div>
+                  {interviewStatus === 'PASSED' ? (
+                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
+                      <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">3. Seleksi Wawancara</strong>
+                      <span className="badge bg-success mt-1">Lulus Wawancara</span>
+                    </div>
+                  ) : interviewStatus === 'FAILED' ? (
+                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
+                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">3. Seleksi Wawancara</strong>
+                      <span className="badge bg-danger mt-1">Tidak Lulus</span>
+                    </div>
+                  ) : administrationStatus === 'PASSED' ? (
+                    <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
+                      <i className="bi bi-chat-dots-fill fs-3 mb-2 d-block text-primary"></i>
+                      <strong className="d-block small">3. Seleksi Wawancara</strong>
+                      <span className="badge bg-primary mt-1">Siap Wawancara</span>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded border bg-light text-muted h-100">
+                      <i className="bi bi-chat-left-dots fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">3. Seleksi Wawancara</strong>
+                      <span className="badge bg-secondary mt-1">Akan Datang</span>
+                    </div>
+                  )}
                 </div>
+
+                {/* Step 4: Pengumuman Kelulusan */}
                 <div className="col-md-3">
-                  <div className="p-3 rounded border bg-light text-muted h-100">
-                    <i className="bi bi-award fs-3 mb-2 d-block"></i>
-                    <strong className="d-block small">4. Pengumuman Kelulusan</strong>
-                    <span className="badge bg-secondary mt-1">Menunggu</span>
-                  </div>
+                  {isAccepted ? (
+                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100 shadow-sm">
+                      <i className="bi bi-trophy-fill fs-3 mb-2 d-block text-warning"></i>
+                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
+                      <span className="badge bg-success mt-1">Diterima</span>
+                    </div>
+                  ) : isRejected ? (
+                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
+                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
+                      <span className="badge bg-danger mt-1">Tidak Lolos</span>
+                    </div>
+                  ) : (
+                    <div className="p-3 rounded border bg-light text-muted h-100">
+                      <i className="bi bi-award fs-3 mb-2 d-block"></i>
+                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
+                      <span className="badge bg-secondary mt-1">Menunggu</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -794,6 +1251,35 @@ export const ApplicationWizardPage: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* ── Revision Mode Banner (If applicable) ─────────────── */}
+        {isEditingRevision && (
+          <div className="alert alert-warning border-warning shadow-sm mb-4 d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div>
+              <h6 className="fw-bold mb-1">
+                <i className="bi bi-pencil-square me-2"></i>Mode Perbaikan Berkas (Revisi Permohonan)
+              </h6>
+              <p className="small mb-0">
+                Silakan ganti atau perbaiki dokumen yang ditolak oleh verifikator pada Bagian 3, lalu klik tombol <strong>Kirim Ulang Permohonan</strong>.
+              </p>
+            </div>
+            <div className="d-flex gap-2">
+              <button
+                className="btn btn-sm btn-outline-secondary bg-white shadow-sm"
+                onClick={() => setIsEditingRevision(false)}
+              >
+                <i className="bi bi-arrow-left me-1"></i> Batal &amp; Kembali ke Status
+              </button>
+              <button
+                className="btn btn-sm btn-warning text-dark fw-bold shadow-sm"
+                onClick={handleResubmit}
+                disabled={isSubmitting}
+              >
+                <i className="bi bi-send-check me-1"></i> {isSubmitting ? 'Mengirim Ulang...' : 'Kirim Ulang Permohonan'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ── Alerts ──────────────────────────────────────────── */}
         {saveSuccess && (

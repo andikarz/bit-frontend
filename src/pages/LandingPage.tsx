@@ -213,7 +213,7 @@ export const LandingPage: React.FC = () => {
                     {user.role === 'PESERTA' && (
                       <li>
                         <Link className="dropdown-item" to="/daftar">
-                          <i className="bi bi-file-earmark-text me-2"></i>Formulir Pendaftaran
+                          <i className="bi bi-person-lines-fill me-2"></i>Status &amp; Pendaftaran Beasiswa
                         </Link>
                       </li>
                     )}
