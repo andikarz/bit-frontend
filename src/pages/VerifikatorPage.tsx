@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../services/api';
+import { api, getAccessToken } from '../services/api';
 
 /* ── Type Definitions ──────────────────────────────────────────── */
 interface QueueItem {
@@ -620,7 +620,7 @@ export const VerifikatorPage: React.FC = () => {
                                       </td>
                                       <td>
                                         <a
-                                          href={`/api/v1/documents/${item.documentId}/content`}
+                                          href={`/api/v1/documents/${item.documentId}/content${getAccessToken() ? `?token=${encodeURIComponent(getAccessToken()!)}` : ''}`}
                                           target="_blank"
                                           rel="noopener noreferrer"
                                           className="btn btn-sm btn-outline-primary w-100"
