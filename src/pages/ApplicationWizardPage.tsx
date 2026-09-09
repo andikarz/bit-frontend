@@ -383,11 +383,11 @@ export const ApplicationWizardPage: React.FC = () => {
   };
 
   // ── Step 4 Save (Persetujuan) ───────────────────────────────
-  const saveStep4 = async (): Promise<boolean> => {
-    if (!applicationId) return false;
+  const saveStep4 = async (): Promise<number | null> => {
+    if (!applicationId) return null;
     if (!agreed) {
       setSaveError('Anda wajib menyetujui pernyataan keabsahan data sebelum mengirim permohonan.');
-      return false;
+      return null;
     }
 
     setIsSaving(true);
@@ -399,12 +399,13 @@ export const ApplicationWizardPage: React.FC = () => {
         agreementVersion: 'v1.0',
         expectedVersion: appVersion
       });
-      setAppVersion(res.data.version);
+      const newVersion = res.data?.version ?? (appVersion + 1);
+      setAppVersion(newVersion);
       setSaveSuccess('Persetujuan berhasil disimpan');
-      return true;
+      return newVersion;
     } catch (err: any) {
       setSaveError(err.message || 'Gagal menyimpan lembar persetujuan');
-      return false;
+      return null;
     } finally {
       setIsSaving(false);
     }
@@ -417,19 +418,22 @@ export const ApplicationWizardPage: React.FC = () => {
     setSaveError(null);
 
     try {
-      // 1. Save consent first
-      const consentOk = await saveStep4();
-      if (!consentOk) {
+      // 1. Save consent first and obtain the newly incremented version
+      const freshVersion = await saveStep4();
+      if (freshVersion === null) {
         setShowSubmitModal(false);
         setIsSubmitting(false);
         return;
       }
 
-      // 2. Submit application atomically (AT-08)
+      // 2. Submit application atomically (AT-08) using the fresh version
       const res = await api.post(`/api/v1/applications/${applicationId}/submit`, {
-        expectedVersion: appVersion
+        expectedVersion: freshVersion
       });
 
+      if (res.data?.registrationCode) {
+        setRegistrationCode(res.data.registrationCode);
+      }
       setSubmissionStatus('SUBMITTED');
       setSubmittedAt(new Date().toISOString());
       setShowSubmitModal(false);
