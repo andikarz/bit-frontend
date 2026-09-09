@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../services/api';
+import { api, getAccessToken } from '../services/api';
 import { useNavigate, useSearchParams, Link } from 'react-router-dom';
 
 interface RegionItem {
@@ -45,6 +45,15 @@ export const ApplicationWizardPage: React.FC = () => {
   const [appVersion, setAppVersion] = useState<number>(1);
   const [programName, setProgramName] = useState('Pelatihan Beasiswa');
   const [programRequirements, setProgramRequirements] = useState<any[]>([]);
+
+  // ── Modal & Confirmation State (Mockup 6_index_lulus.html) ────
+  const [showDaftarUlangModal, setShowDaftarUlangModal] = useState(false);
+  const [showReadonlyModal, setShowReadonlyModal] = useState(false);
+  const [showSuratModal, setShowSuratModal] = useState(false);
+  const [kesediaanStatus, setKesediaanStatus] = useState<'CONFIRMED' | 'WITHDRAWN'>('CONFIRMED');
+  const [catatanKonfirmasi, setCatatanKonfirmasi] = useState('');
+  const [isSubmittingConfirmation, setIsSubmittingConfirmation] = useState(false);
+  const [readonlyActiveTab, setReadonlyActiveTab] = useState<'ringkasan' | 'datadiri' | 'pendidikan' | 'berkas'>('ringkasan');
 
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -134,6 +143,11 @@ export const ApplicationWizardPage: React.FC = () => {
           setInterviewStatus(appData.interviewStatus || 'NOT_ELIGIBLE');
           setFinalStatus(appData.finalStatus || 'UNDECIDED');
           setConfirmationStatus(appData.confirmationStatus || 'NOT_AVAILABLE');
+          if (appData.confirmation) {
+            setConfirmationStatus(appData.confirmation.status || 'NOT_AVAILABLE');
+            setKesediaanStatus(appData.confirmation.status || 'CONFIRMED');
+            if (appData.confirmation.notes) setCatatanKonfirmasi(appData.confirmation.notes);
+          }
           setSubmittedAt(appData.submittedAt || null);
           setAppVersion(appData.version || 1);
           setCurrentStep(appData.currentStep || 1);
@@ -217,6 +231,11 @@ export const ApplicationWizardPage: React.FC = () => {
         setInterviewStatus(d.interviewStatus || 'NOT_ELIGIBLE');
         setFinalStatus(d.finalStatus || 'UNDECIDED');
         setConfirmationStatus(d.confirmationStatus || 'NOT_AVAILABLE');
+        if (d.confirmation) {
+          setConfirmationStatus(d.confirmation.status || 'NOT_AVAILABLE');
+          setKesediaanStatus(d.confirmation.status || 'CONFIRMED');
+          if (d.confirmation.notes) setCatatanKonfirmasi(d.confirmation.notes);
+        }
         setSubmittedAt(d.submittedAt || null);
         setAppVersion(d.version || 1);
         if (d.review) setReviewData(d.review);
@@ -580,6 +599,34 @@ export const ApplicationWizardPage: React.FC = () => {
     }
   };
 
+  const handleSubmitConfirmation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!applicationId) return;
+    setIsSubmittingConfirmation(true);
+    try {
+      const res = await api.post(`/api/v1/applications/${applicationId}/confirmation`, {
+        status: kesediaanStatus,
+        notes: catatanKonfirmasi
+      });
+      if (res.data) {
+        setConfirmationStatus(res.data.status);
+        setShowDaftarUlangModal(false);
+        setSaveSuccess(
+          kesediaanStatus === 'CONFIRMED'
+            ? 'Konfirmasi kesediaan Anda berhasil dikirim! Terima kasih atas komitmen Anda.'
+            : 'Konfirmasi pengunduran diri Anda telah tercatat.'
+        );
+        setTimeout(() => setSaveSuccess(null), 5000);
+        refreshStatus();
+      }
+    } catch (err: any) {
+      setSaveError(err.response?.data?.message || err.message || 'Gagal mengirim konfirmasi daftar ulang');
+      setTimeout(() => setSaveError(null), 5000);
+    } finally {
+      setIsSubmittingConfirmation(false);
+    }
+  };
+
   // Requirements list to render
   const activeRequirements = programRequirements.length > 0 ? programRequirements : [
     { requirementTypeId: 'req-ktp-uuid', code: 'KTP', name: 'Kartu Tanda Penduduk (KTP)', description: 'Scan KTP asli yang masih berlaku', isRequired: true },
@@ -616,6 +663,26 @@ export const ApplicationWizardPage: React.FC = () => {
     return (
       <div className="bg-light min-vh-100 pb-5">
         <style>{`
+          .hero-lulus {
+            background: linear-gradient(135deg, #198754 0%, #0f5132 100%);
+            color: white;
+            border-radius: 12px;
+          }
+          .badge-status {
+            font-size: 0.9rem;
+            padding: 8px 14px;
+          }
+          .wizard-steps .nav-link {
+            color: #6c757d;
+            border-radius: 0;
+            border-bottom: 3px solid transparent;
+          }
+          .wizard-steps .nav-link.active {
+            color: #0d6efd;
+            background-color: transparent;
+            border-bottom: 3px solid #0d6efd;
+            font-weight: bold;
+          }
           @keyframes spin {
             from { transform: rotate(0deg); }
             to { transform: rotate(360deg); }
@@ -624,35 +691,62 @@ export const ApplicationWizardPage: React.FC = () => {
             animation: spin 1s linear infinite;
             display: inline-block;
           }
+          @media print {
+            body * {
+              visibility: hidden !important;
+            }
+            #printable-surat-modal, #printable-surat-modal * {
+              visibility: visible !important;
+            }
+            #printable-surat-modal {
+              position: fixed;
+              left: 0;
+              top: 0;
+              width: 100vw;
+              margin: 0;
+              padding: 24px;
+              background: white;
+              z-index: 99999;
+            }
+            .no-print {
+              display: none !important;
+            }
+          }
         `}</style>
-        {/* Navigation Bar */}
-        <nav className="navbar navbar-expand-lg navbar-dark bg-primary sticky-top shadow-sm">
+
+        {/* Navbar User */}
+        <nav className="navbar navbar-expand-lg navbar-dark bg-primary sticky-top shadow-sm no-print">
           <div className="container">
             <Link className="navbar-brand fw-bold" to="/">
               <i className="bi bi-mortarboard-fill me-2"></i>BeasiswaApp
             </Link>
             <div className="dropdown ms-auto">
-              <button className="btn btn-outline-light dropdown-toggle btn-sm" type="button" data-bs-toggle="dropdown">
+              <button className="btn btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown">
                 <i className="bi bi-person-circle me-1"></i> {fullName || user?.fullName || user?.email}
               </button>
               <ul className="dropdown-menu dropdown-menu-end shadow border-0">
-                <li><Link className="dropdown-item" to="/"><i className="bi bi-house me-2"></i>Beranda</Link></li>
-                <li><button className="dropdown-item" onClick={() => refreshStatus(true)}><i className="bi bi-arrow-clockwise me-2"></i>Perbarui Status</button></li>
+                <li>
+                  <button className="dropdown-item" onClick={() => refreshStatus(true)}>
+                    <i className="bi bi-arrow-clockwise me-2"></i>Perbarui Status
+                  </button>
+                </li>
                 <li><hr className="dropdown-divider" /></li>
-                <li><button className="dropdown-item text-danger" onClick={() => logout()}><i className="bi bi-box-arrow-right me-2"></i>Keluar</button></li>
+                <li>
+                  <button className="dropdown-item text-danger" onClick={() => logout()}>
+                    <i className="bi bi-box-arrow-right me-2"></i>Keluar (Logout)
+                  </button>
+                </li>
               </ul>
             </div>
           </div>
         </nav>
 
-        <div className="container py-4" style={{ maxWidth: '900px' }}>
+        <div className="container py-4">
           {/* Top Bar with Refresh & Notice */}
-          <div className="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-            <div>
-              <span className="badge bg-white text-secondary border shadow-sm px-3 py-2">
-                <i className="bi bi-person-badge me-1 text-primary"></i> Portal Status &amp; Pengumuman Peserta
-              </span>
-            </div>
+          <div className="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2 no-print">
+            <span className="badge bg-white text-secondary border shadow-sm px-3 py-2">
+              <i className="bi bi-person-badge me-1 text-primary"></i> Portal Status &amp; Pengumuman Peserta
+            </span>
             <button
               className="btn btn-sm btn-outline-primary bg-white shadow-sm d-flex align-items-center gap-2 fw-semibold px-3 py-1"
               onClick={() => refreshStatus(true)}
@@ -670,262 +764,282 @@ export const ApplicationWizardPage: React.FC = () => {
               <button type="button" className="btn-close" onClick={() => setSaveSuccess(null)}></button>
             </div>
           )}
-
-          {/* ══════════════════════════════════════════════════════════ */}
-          {/* DYNAMIC HEADER BANNER (BY SELECTION OUTCOME) */}
-          {/* ══════════════════════════════════════════════════════════ */}
-
-          {/* CASE A: LULUS & DITERIMA (FINAL ACCEPTED) */}
-          {isAccepted && (
-            <div className="card shadow-lg border-0 mb-4 overflow-hidden" style={{ background: 'linear-gradient(135deg, #047857 0%, #059669 50%, #10b981 100%)', color: '#fff' }}>
-              <div className="card-body p-4 p-md-5 text-center position-relative">
-                <div className="d-inline-flex align-items-center justify-content-center bg-white text-warning rounded-circle mb-3 shadow" style={{ width: '88px', height: '88px' }}>
-                  <i className="bi bi-trophy-fill fs-1 text-warning"></i>
-                </div>
-                <div className="mb-2">
-                  <span className="badge bg-warning text-dark px-3 py-1 fw-bold text-uppercase">
-                    <i className="bi bi-patch-check-fill me-1"></i> Pengumuman Kelulusan Akhir Resmi
-                  </span>
-                </div>
-                <h2 className="fw-bold mb-2 text-white">🎉 SELAMAT! ANDA DINYATAKAN LULUS &amp; DITERIMA!</h2>
-                <p className="lead mb-3 text-white-50" style={{ maxWidth: '720px', margin: '0 auto' }}>
-                  Selamat kepada <strong className="text-white">{fullName || user?.fullName}</strong>! Permohonan beasiswa Anda pada program <strong>{programName}</strong> telah berhasil menyelesaikan seluruh rangkaian seleksi dan resmi dinyatakan <strong>DITERIMA</strong> sebagai Penerima Beasiswa.
-                </p>
-
-                {/* Registration Code Badge */}
-                <div className="d-inline-flex align-items-center gap-2 bg-white bg-opacity-10 border border-white border-opacity-25 rounded-pill px-4 py-2 mb-3">
-                  <span className="small text-white-50 fw-semibold">Nomor Registrasi:</span>
-                  <span className="fs-5 fw-bold font-monospace text-warning">{registrationCode}</span>
-                  <button
-                    className="btn btn-sm btn-link text-white p-0 border-0"
-                    title="Salin Nomor Registrasi"
-                    onClick={copyRegistrationCode}
-                  >
-                    <i className={`bi ${copiedCode ? 'bi-check-lg text-warning' : 'bi-clipboard'}`}></i>
-                  </button>
-                </div>
-                {copiedCode && <div className="text-warning small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
-
-                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
-                  <span className="badge bg-white text-success px-3 py-2 fs-6 fw-bold shadow-sm">
-                    <i className="bi bi-patch-check-fill me-1"></i> Keputusan: DITERIMA (ACCEPTED)
-                  </span>
-                  <span className="badge bg-success-subtle text-white border border-white border-opacity-50 px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-shield-check me-1"></i> Administrasi: LOLOS (PASSED)
-                  </span>
-                  <span className="badge bg-success-subtle text-white border border-white border-opacity-50 px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-chat-check-fill me-1"></i> Wawancara: LULUS (PASSED)
-                  </span>
-                </div>
-                {submittedAt && (
-                  <div className="text-white-50 small mt-3">
-                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
-                  </div>
-                )}
-              </div>
+          {saveError && (
+            <div className="alert alert-danger alert-dismissible fade show shadow-sm mb-3" role="alert">
+              <i className="bi bi-exclamation-octagon-fill me-2"></i>{saveError}
+              <button type="button" className="btn-close" onClick={() => setSaveError(null)}></button>
             </div>
           )}
 
-          {/* CASE B: TIDAK LOLOS / GAGAL */}
-          {isRejected && (
-            <div className="card shadow-sm border-danger border-2 mb-4 overflow-hidden bg-danger-subtle">
-              <div className="card-body p-4 p-md-5 text-center">
-                <div className="d-inline-flex align-items-center justify-content-center bg-danger text-white rounded-circle mb-3 shadow" style={{ width: '80px', height: '80px' }}>
-                  <i className="bi bi-x-lg fs-1"></i>
-                </div>
-                <div className="mb-2">
-                  <span className="badge bg-danger px-3 py-1 fw-bold text-uppercase">
-                    Pengumuman Hasil Seleksi
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* BANNER HERO UCAPAN SELAMAT (Mockup 6_index_lulus.html)    */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {isAccepted && (
+            <div className="hero-lulus p-4 p-md-5 mb-4 shadow-sm position-relative overflow-hidden">
+              <div className="row align-items-center">
+                <div className="col-md-8">
+                  <span className="badge bg-warning text-dark fw-bold mb-2">
+                    <i className="bi bi-trophy-fill me-1"></i> PENGUMUMAN SELEKSI FINAL
                   </span>
-                </div>
-                <h3 className="fw-bold text-danger mb-2">Mohon Maaf, Anda Belum Lolos Seleksi</h3>
-                <p className="text-muted mb-3" style={{ maxWidth: '680px', margin: '0 auto' }}>
-                  {administrationStatus === 'REJECTED'
-                    ? 'Berkas administrasi dan dokumen yang diunggah belum memenuhi persyaratan kualifikasi program beasiswa ini.'
-                    : interviewStatus === 'FAILED'
-                    ? 'Berdasarkan evaluasi wawancara oleh Lembaga Seleksi, hasil penilaian belum mencapai nilai standar kelulusan (passing grade).'
-                    : 'Permohonan beasiswa Anda pada program ini belum dapat diloloskan pada periode seleksi saat ini.'}
-                </p>
+                  <h2 className="display-6 fw-bold mb-2">Selamat, {fullName || user?.fullName || 'Peserta'}!</h2>
+                  <p className="lead mb-3">
+                    Anda dinyatakan <strong>LULUS SELEKSI</strong> dan diterima sebagai penerima beasiswa program <strong>{programName}</strong>.
+                  </p>
+                  <div className="d-flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-warning fw-bold text-dark shadow-sm"
+                      onClick={() => setShowSuratModal(true)}
+                    >
+                      <i className="bi bi-file-earmark-pdf-fill me-1"></i> Unduh Surat Kelulusan (PDF)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline-light"
+                      onClick={() => setShowDaftarUlangModal(true)}
+                    >
+                      <i className="bi bi-check-circle-fill me-1"></i> Konfirmasi / Daftar Ulang
+                    </button>
+                  </div>
 
-                {/* Registration Code Badge */}
-                <div className="d-inline-flex align-items-center gap-2 bg-white border rounded-pill px-4 py-2 mb-3">
-                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
-                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
-                  <button
-                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
-                    title="Salin Nomor Registrasi"
-                    onClick={copyRegistrationCode}
-                  >
-                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
-                  </button>
-                </div>
-                {copiedCode && <div className="text-success small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
-
-                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
-                  <span className="badge bg-danger px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-x-circle me-1"></i> Status: TIDAK DITERIMA
-                  </span>
-                  <span className={`badge ${administrationStatus === 'PASSED' ? 'bg-success' : 'bg-secondary'} px-3 py-2 fs-6 fw-semibold`}>
-                    <i className="bi bi-file-earmark-text me-1"></i> Administrasi: {administrationStatus === 'PASSED' ? 'LOLOS' : 'DITOLAK'}
-                  </span>
-                  {interviewStatus !== 'NOT_ELIGIBLE' && (
-                    <span className="badge bg-danger px-3 py-2 fs-6 fw-semibold">
-                      <i className="bi bi-chat-left-dots me-1"></i> Wawancara: TIDAK LULUS
-                    </span>
+                  {confirmationStatus === 'CONFIRMED' && (
+                    <div className="mt-3">
+                      <span className="badge bg-white text-success fw-bold px-3 py-2 shadow-sm">
+                        <i className="bi bi-check2-circle me-1"></i> Status Kehadiran: Bersedia Mengikuti Pelatihan
+                      </span>
+                    </div>
+                  )}
+                  {confirmationStatus === 'WITHDRAWN' && (
+                    <div className="mt-3">
+                      <span className="badge bg-white text-danger fw-bold px-3 py-2 shadow-sm">
+                        <i className="bi bi-x-circle me-1"></i> Status Kehadiran: Mengundurkan Diri
+                      </span>
+                    </div>
                   )}
                 </div>
-                {submittedAt && (
-                  <div className="text-muted small mt-2">
-                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
-                  </div>
-                )}
+                <div className="col-md-4 text-center d-none d-md-block">
+                  <i className="bi bi-award-fill opacity-75" style={{ fontSize: '8rem' }}></i>
+                </div>
               </div>
             </div>
           )}
 
-          {/* CASE C: LOLOS ADMINISTRASI & MENUNGGU WAWANCARA */}
+          {/* BANNER JIKA LOLOS ADMINISTRASI & MENUNGGU WAWANCARA */}
           {isPassedAdmin && (
-            <div className="card shadow border-0 mb-4 overflow-hidden" style={{ background: 'linear-gradient(135deg, #1e40af 0%, #2563eb 60%, #0ea5e9 100%)', color: '#fff' }}>
-              <div className="card-body p-4 p-md-5 text-center">
-                <div className="d-inline-flex align-items-center justify-content-center bg-white text-primary rounded-circle mb-3 shadow-lg" style={{ width: '80px', height: '80px' }}>
-                  <i className="bi bi-stars fs-1 text-primary"></i>
-                </div>
-                <div className="mb-2">
-                  <span className="badge bg-success px-3 py-1 fw-bold text-uppercase">
-                    <i className="bi bi-check-circle-fill me-1"></i> Tahap 1 Administrasi Selesai
-                  </span>
-                </div>
-                <h3 className="fw-bold mb-2 text-white">🎉 Selamat! Anda Dinyatakan LOLOS Seleksi Administrasi!</h3>
-                <p className="lead mb-3 text-white-50" style={{ maxWidth: '720px', margin: '0 auto' }}>
-                  Berkas administrasi dan dokumen persyaratan Anda telah diverifikasi oleh tim verifikator dan dinyatakan <strong>LENGKAP &amp; SESUAI</strong>. Permohonan Anda saat ini berhak dan telah dialihkan ke tahapan <strong>Seleksi Wawancara</strong>.
+            <div className="alert alert-primary border-0 shadow-sm d-flex align-items-center mb-4 p-4 rounded-3" role="alert">
+              <i className="bi bi-patch-check-fill fs-2 me-3 text-primary"></i>
+              <div>
+                <strong className="fs-5 text-primary">Selamat! Anda Dinyatakan Lolos Seleksi Administrasi</strong>
+                <p className="mb-0 small text-secondary">
+                  Berkas administrasi Anda telah diverifikasi dan dinyatakan lengkap &amp; sesuai. Saat ini permohonan Anda siap untuk tahapan <strong>Seleksi Wawancara</strong>.
                 </p>
-
-                {/* Registration Code Badge */}
-                <div className="d-inline-flex align-items-center gap-2 bg-white bg-opacity-10 border border-white border-opacity-25 rounded-pill px-4 py-2 mb-3">
-                  <span className="small text-white-50 fw-semibold">Nomor Registrasi:</span>
-                  <span className="fs-5 fw-bold font-monospace text-warning">{registrationCode}</span>
-                  <button
-                    className="btn btn-sm btn-link text-white p-0 border-0"
-                    title="Salin Nomor Registrasi"
-                    onClick={copyRegistrationCode}
-                  >
-                    <i className={`bi ${copiedCode ? 'bi-check-lg text-warning' : 'bi-clipboard'}`}></i>
-                  </button>
-                </div>
-                {copiedCode && <div className="text-warning small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
-
-                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2">
-                  <span className="badge bg-success px-3 py-2 fs-6 fw-bold shadow-sm">
-                    <i className="bi bi-check2-circle me-1"></i> Administrasi: LOLOS (PASSED)
-                  </span>
-                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-bold shadow-sm">
-                    <i className="bi bi-headset me-1"></i> Wawancara: MENUNGGU JADWAL / PENILAIAN
-                  </span>
-                  <span className="badge bg-white-50 text-white px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-hourglass-split me-1"></i> Keputusan Akhir: PROSES SELEKSI
-                  </span>
-                </div>
-                {submittedAt && (
-                  <div className="text-white-50 small mt-3">
-                    <i className="bi bi-clock me-1"></i> Terdaftar pada: {new Date(submittedAt).toLocaleString('id-ID')}
-                  </div>
-                )}
               </div>
             </div>
           )}
 
-          {/* CASE D: PERBAIKAN BERKAS (REVISI) */}
-          {isRevision && (
-            <div className="card shadow-sm border-warning border-2 mb-4 overflow-hidden bg-warning-subtle">
-              <div className="card-body p-4 text-center">
-                <div className="d-inline-flex align-items-center justify-content-center bg-warning text-dark rounded-circle mb-3 shadow" style={{ width: '80px', height: '80px' }}>
-                  <i className="bi bi-exclamation-triangle-fill fs-1"></i>
-                </div>
-                <h3 className="fw-bold text-dark mb-2">Perhatian: Berkas Permohonan Memerlukan Perbaikan (Revisi)</h3>
-                <p className="text-muted mb-3" style={{ maxWidth: '650px', margin: '0 auto' }}>
-                  Tim verifikator telah memeriksa permohonan Anda dan memerlukan perbaikan atau unggah ulang dokumen sebelum dapat diproses lebih lanjut.
-                </p>
-
-                {/* Registration Code Badge */}
-                <div className="d-inline-flex align-items-center gap-2 bg-white border rounded-pill px-4 py-2 mb-3">
-                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
-                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
-                  <button
-                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
-                    title="Salin Nomor Registrasi"
-                    onClick={copyRegistrationCode}
-                  >
-                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
-                  </button>
-                </div>
-
-                <div className="d-flex flex-wrap justify-content-center gap-2 mt-2 mb-3">
-                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-bold">
-                    <i className="bi bi-exclamation-circle me-1"></i> Administrasi: PERLU REVISI
-                  </span>
-                  <span className="badge bg-secondary px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-clock-history me-1"></i> Status: MENUNGGU PERBAIKAN
-                  </span>
-                </div>
-
-                <button
-                  className="btn btn-warning text-dark fw-bold px-4 py-2 shadow-sm"
-                  onClick={() => {
-                    setCurrentStep(3);
-                    setIsEditingRevision(true);
-                  }}
-                >
-                  <i className="bi bi-pencil-square me-2"></i>Perbaiki Berkas Sekarang
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* CASE E: PENDING VERIFIKASI (DEFAULT SUBMITTED) */}
+          {/* BANNER JIKA PENDING VERIFIKASI (Mockup 3_index_terkirim.html) */}
           {isPending && (
-            <div className="card shadow-sm border-0 mb-4 overflow-hidden">
-              <div className="card-body p-4 text-center bg-white">
-                <div className="d-inline-flex align-items-center justify-content-center bg-primary-subtle text-primary rounded-circle mb-3" style={{ width: '72px', height: '72px' }}>
-                  <i className="bi bi-hourglass-split fs-1"></i>
-                </div>
-                <h3 className="fw-bold text-dark mb-1">Pendaftaran Beasiswa Berhasil Dikirim!</h3>
-                <p className="text-muted mb-3" style={{ maxWidth: '650px', margin: '0 auto' }}>
-                  Permohonan Anda telah tersimpan secara resmi dan saat ini sedang menunggu antrean verifikasi berkas administrasi oleh tim verifikator.
+            <div className="alert alert-success border-0 shadow-sm d-flex align-items-center mb-4 p-4 rounded-3" role="alert">
+              <i className="bi bi-check-circle-fill fs-2 me-3 text-success"></i>
+              <div>
+                <strong className="fs-5 text-success">Pendaftaran Berhasil Terkirim!</strong>
+                <p className="mb-0 small text-secondary">
+                  Berkas Anda telah terkunci dan saat ini sedang dalam proses <strong>Seleksi Administrasi</strong> oleh Verifikator. Perubahan data tidak dapat dilakukan selama proses verifikasi berjalan.
                 </p>
+              </div>
+            </div>
+          )}
 
-                {/* Registration Code Badge */}
-                <div className="d-inline-flex align-items-center gap-2 bg-light border rounded-pill px-4 py-2 mb-3">
-                  <span className="small text-muted fw-semibold">Nomor Registrasi:</span>
-                  <span className="fs-5 fw-bold font-monospace text-primary">{registrationCode}</span>
-                  <button
-                    className="btn btn-sm btn-outline-primary border-0 rounded-circle"
-                    title="Salin Nomor Registrasi"
-                    onClick={copyRegistrationCode}
-                  >
-                    <i className={`bi ${copiedCode ? 'bi-check-lg text-success' : 'bi-clipboard'}`}></i>
-                  </button>
+          {/* BANNER JIKA REVISI BERKAS (Mockup 4_index_revisi.html) */}
+          {isRevision && (
+            <div className="alert alert-warning border-0 shadow-sm d-flex flex-wrap align-items-center justify-content-between mb-4 p-4 rounded-3" role="alert">
+              <div className="d-flex align-items-center mb-2 mb-md-0">
+                <i className="bi bi-exclamation-triangle-fill fs-2 me-3 text-warning"></i>
+                <div>
+                  <strong className="fs-5 text-dark">Perhatian: Berkas Permohonan Memerlukan Perbaikan (Revisi)</strong>
+                  <p className="mb-0 small text-secondary">
+                    Tim verifikator memerlukan perbaikan atau unggah ulang dokumen sebelum permohonan dapat diproses lebih lanjut.
+                  </p>
                 </div>
-                {copiedCode && <div className="text-success small fw-semibold mb-2">Nomor registrasi berhasil disalin!</div>}
+              </div>
+              <button
+                className="btn btn-warning text-dark fw-bold px-3 py-2 shadow-sm"
+                onClick={() => {
+                  setCurrentStep(3);
+                  setIsEditingRevision(true);
+                }}
+              >
+                <i className="bi bi-pencil-square me-2"></i>Perbaiki Berkas Sekarang
+              </button>
+            </div>
+          )}
 
-                <div className="d-flex justify-content-center gap-2 mt-2">
-                  <span className="badge bg-primary px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-shield-check me-1"></i> Status: SUBMITTED
-                  </span>
-                  <span className="badge bg-warning text-dark px-3 py-2 fs-6 fw-semibold">
-                    <i className="bi bi-hourglass-split me-1"></i> Administrasi: DALAM ANTREAN (PENDING)
-                  </span>
-                </div>
-                {submittedAt && (
-                  <div className="text-muted small mt-2">
-                    <i className="bi bi-clock me-1"></i> Dikirim pada: {new Date(submittedAt).toLocaleString('id-ID')}
-                  </div>
-                )}
+          {/* BANNER JIKA TIDAK LOLOS */}
+          {isRejected && (
+            <div className="alert alert-danger border-0 shadow-sm d-flex align-items-center mb-4 p-4 rounded-3" role="alert">
+              <i className="bi bi-x-circle-fill fs-2 me-3 text-danger"></i>
+              <div>
+                <strong className="fs-5 text-danger">Pengumuman Hasil Seleksi: Mohon Maaf, Anda Belum Lolos Seleksi</strong>
+                <p className="mb-0 small text-secondary">
+                  {administrationStatus === 'REJECTED'
+                    ? 'Berkas administrasi dan dokumen yang diunggah belum memenuhi kriteria persyaratan program beasiswa ini.'
+                    : interviewStatus === 'FAILED'
+                    ? 'Berdasarkan evaluasi wawancara oleh Lembaga Seleksi, hasil penilaian belum memenuhi standar kelulusan.'
+                    : 'Permohonan beasiswa Anda pada program ini belum dapat diloloskan pada periode seleksi saat ini.'}
+                </p>
               </div>
             </div>
           )}
 
           {/* ══════════════════════════════════════════════════════════ */}
-          {/* EVALUATION SCORES & NOTES (IF AVAILABLE) */}
+          {/* TABEL MONITORING STATUS DETAIL (Mockup 6_index_lulus.html) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          <div className="card border-0 shadow-sm mb-4">
+            <div className="card-header bg-white py-3 fw-bold border-bottom d-flex justify-content-between align-items-center">
+              <span>
+                <i className="bi bi-clipboard-data-fill me-2 text-success"></i>Rincian Status Seleksi Peserta
+              </span>
+              <span className="badge bg-light text-dark border font-monospace">
+                Kode: {registrationCode || 'REG-PENDING'}
+              </span>
+            </div>
+            <div className="card-body">
+              <div className="table-responsive">
+                <table className="table table-hover align-middle mb-0">
+                  <thead className="table-light">
+                    <tr>
+                      <th>Program Pelatihan</th>
+                      <th>Seleksi Administrasi</th>
+                      <th>Seleksi Wawancara</th>
+                      <th>Status Akhir (Kelulusan)</th>
+                      <th>Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>
+                        <strong>{programName}</strong><br />
+                        <small className="text-muted">Kode Pendaftaran: {registrationCode || 'REG-PENDING'}</small>
+                      </td>
+                      <td>
+                        {administrationStatus === 'PASSED' ? (
+                          <span className="badge bg-success badge-status">
+                            <i className="bi bi-check-circle-fill me-1"></i> Lolos
+                          </span>
+                        ) : administrationStatus === 'REJECTED' ? (
+                          <span className="badge bg-danger badge-status">
+                            <i className="bi bi-x-circle-fill me-1"></i> Tidak Lolos
+                          </span>
+                        ) : administrationStatus === 'REVISION' ? (
+                          <span className="badge bg-warning text-dark badge-status">
+                            <i className="bi bi-pencil-square me-1"></i> Revisi Berkas
+                          </span>
+                        ) : (
+                          <span className="badge bg-info text-dark badge-status">
+                            <i className="bi bi-hourglass-split me-1"></i> Proses Verifikasi
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {interviewStatus === 'PASSED' ? (
+                          <span className="badge bg-success badge-status">
+                            <i className="bi bi-check-circle-fill me-1"></i> Lulus Wawancara
+                          </span>
+                        ) : interviewStatus === 'FAILED' ? (
+                          <span className="badge bg-danger badge-status">
+                            <i className="bi bi-x-circle-fill me-1"></i> Tidak Lulus
+                          </span>
+                        ) : administrationStatus === 'PASSED' ? (
+                          <span className="badge bg-warning text-dark badge-status">
+                            <i className="bi bi-clock-history me-1"></i> Menunggu Jadwal
+                          </span>
+                        ) : (
+                          <span className="badge bg-secondary badge-status">
+                            -
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {isAccepted ? (
+                          <span className="badge bg-success badge-status">
+                            <i className="bi bi-trophy-fill me-1"></i> DITERIMA (LULUS)
+                          </span>
+                        ) : isRejected ? (
+                          <span className="badge bg-danger badge-status">
+                            <i className="bi bi-x-circle-fill me-1"></i> DITOLAK
+                          </span>
+                        ) : (
+                          <span className="badge bg-info text-dark badge-status">
+                            <i className="bi bi-hourglass-split me-1"></i> PROSES SELEKSI
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {isRevision ? (
+                          <button
+                            className="btn btn-sm btn-warning text-dark fw-bold"
+                            onClick={() => {
+                              setCurrentStep(3);
+                              setIsEditingRevision(true);
+                            }}
+                          >
+                            <i className="bi bi-pencil-square me-1"></i> Perbaiki Berkas
+                          </button>
+                        ) : (
+                          <button
+                            className="btn btn-sm btn-outline-primary"
+                            onClick={() => setShowReadonlyModal(true)}
+                          >
+                            <i className="bi bi-eye me-1"></i> Lihat Data Pendaftaran
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* RINCIAN LANGKAH SELANJUTNYA & JADWAL (Mockup 6_index_lulus)*/}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {isAccepted && (
+            <div className="row g-3 mb-4">
+              <div className="col-md-6">
+                <div className="card border-0 shadow-sm h-100">
+                  <div className="card-body">
+                    <h6 className="fw-bold text-success mb-3">
+                      <i className="bi bi-info-circle-fill me-2"></i>Langkah Selanjutnya
+                    </h6>
+                    <ol className="small text-secondary ps-3 mb-0">
+                      <li className="mb-2">Unduh Surat Keterangan Kelulusan resmi berbentuk PDF melalui tombol di atas.</li>
+                      <li className="mb-2">Lakukan konfirmasi kehadiran/daftar ulang sebelum <strong>10 September 2026</strong>.</li>
+                      <li className="mb-2">Bergabung ke dalam grup koordinasi Telegram/WhatsApp peserta pelatihan.</li>
+                      <li>Mengikuti Orientasi Pembukaan Pelatihan secara daring sesuai jadwal terlampir pada surat.</li>
+                    </ol>
+                  </div>
+                </div>
+              </div>
+              <div className="col-md-6">
+                <div className="card border-0 shadow-sm h-100 bg-white">
+                  <div className="card-body">
+                    <h6 className="fw-bold text-primary mb-3">
+                      <i className="bi bi-calendar-check-fill me-2"></i>Jadwal Kegiatan Pelatihan
+                    </h6>
+                    <ul className="list-unstyled small mb-0">
+                      <li className="mb-2"><strong>Konfirmasi Daftar Ulang:</strong> 02 - 10 September 2026</li>
+                      <li className="mb-2"><strong>Orientasi Peserta:</strong> 15 September 2026 (09.00 WIB)</li>
+                      <li><strong>Pelaksanaan Kelas Pertama:</strong> 20 September 2026</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* EVALUASI SELEKSI WAWANCARA (JIKA TERSEDIA)                */}
           {/* ══════════════════════════════════════════════════════════ */}
           {interviewScoreData && (
             <div className="card shadow-sm border-0 mb-4">
@@ -985,177 +1099,396 @@ export const ApplicationWizardPage: React.FC = () => {
               <p className="mb-0">{reviewData.generalNotes}</p>
             </div>
           )}
+        </div>
 
-          {/* ══════════════════════════════════════════════════════════ */}
-          {/* TIMELINE TAHAPAN SELEKSI */}
-          {/* ══════════════════════════════════════════════════════════ */}
-          <div className="card shadow-sm border-0 mb-4">
-            <div className="card-header bg-white border-bottom py-3">
-              <h6 className="fw-bold mb-0 text-dark">
-                <i className="bi bi-diagram-3 me-2 text-primary"></i>Tahapan Proses Seleksi
-              </h6>
-            </div>
-            <div className="card-body p-4">
-              <div className="row g-3 text-center">
-                {/* Step 1: Formulir */}
-                <div className="col-md-3">
-                  <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
-                    <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
-                    <strong className="d-block small">1. Pengisian Formulir</strong>
-                    <span className="badge bg-success mt-1">Selesai</span>
-                  </div>
+        {/* ══════════════════════════════════════════════════════════ */}
+        {/* MODAL KONFIRMASI DAFTAR ULANG (Mockup #daftarUlangModal)   */}
+        {/* ══════════════════════════════════════════════════════════ */}
+        {showDaftarUlangModal && (
+          <div className="modal fade show d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+            <div className="modal-dialog modal-dialog-centered">
+              <div className="modal-content border-0 shadow">
+                <div className="modal-header bg-success text-white">
+                  <h5 className="modal-title fw-bold">
+                    <i className="bi bi-check2-square me-2"></i>Konfirmasi Kehadiran / Daftar Ulang
+                  </h5>
+                  <button type="button" className="btn-close btn-close-white" onClick={() => setShowDaftarUlangModal(false)}></button>
                 </div>
-
-                {/* Step 2: Verifikasi Berkas */}
-                <div className="col-md-3">
-                  {administrationStatus === 'PASSED' ? (
-                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
-                      <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">2. Verifikasi Berkas</strong>
-                      <span className="badge bg-success mt-1">Lolos</span>
+                <div className="modal-body">
+                  <p className="small text-muted">
+                    Silakan konfirmasi kesediaan Anda untuk mengikuti program <strong>{programName}</strong> hingga selesai.
+                  </p>
+                  <form onSubmit={handleSubmitConfirmation}>
+                    <div className="mb-3">
+                      <label className="form-label fw-semibold small">Status Kesediaan</label>
+                      <select
+                        className="form-select"
+                        value={kesediaanStatus}
+                        onChange={(e) => setKesediaanStatus(e.target.value as any)}
+                      >
+                        <option value="CONFIRMED">Ya, Saya Bersedia Mengikuti Pelatihan</option>
+                        <option value="WITHDRAWN">Saya Mengundurkan Diri</option>
+                      </select>
                     </div>
-                  ) : administrationStatus === 'REJECTED' ? (
-                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
-                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">2. Verifikasi Berkas</strong>
-                      <span className="badge bg-danger mt-1">Ditolak</span>
+                    <div className="mb-3">
+                      <label className="form-label fw-semibold small">Catatan Tambahan (Opsional)</label>
+                      <textarea
+                        className="form-control"
+                        rows={3}
+                        placeholder="Catatan untuk panitia (misal kesiapan perangkat, jadwal, dll)..."
+                        value={catatanKonfirmasi}
+                        onChange={(e) => setCatatanKonfirmasi(e.target.value)}
+                      ></textarea>
                     </div>
-                  ) : administrationStatus === 'REVISION' ? (
-                    <div className="p-3 rounded border border-warning bg-warning-subtle text-warning-emphasis h-100">
-                      <i className="bi bi-exclamation-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">2. Verifikasi Berkas</strong>
-                      <span className="badge bg-warning text-dark mt-1">Perlu Revisi</span>
+                    <div className="d-flex gap-2">
+                      <button type="button" className="btn btn-light border flex-fill" onClick={() => setShowDaftarUlangModal(false)}>
+                        Batal
+                      </button>
+                      <button type="submit" className="btn btn-success flex-fill fw-semibold" disabled={isSubmittingConfirmation}>
+                        {isSubmittingConfirmation ? (
+                          <>
+                            <span className="spinner-border spinner-border-sm me-2"></span>Menyimpan...
+                          </>
+                        ) : (
+                          'Kirim Konfirmasi'
+                        )}
+                      </button>
                     </div>
-                  ) : (
-                    <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
-                      <i className="bi bi-arrow-repeat fs-3 mb-2 d-block text-primary spin-animation"></i>
-                      <strong className="d-block small">2. Verifikasi Berkas</strong>
-                      <span className="badge bg-primary mt-1">Sedang Berjalan</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Step 3: Wawancara */}
-                <div className="col-md-3">
-                  {interviewStatus === 'PASSED' ? (
-                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100">
-                      <i className="bi bi-check-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">3. Seleksi Wawancara</strong>
-                      <span className="badge bg-success mt-1">Lulus Wawancara</span>
-                    </div>
-                  ) : interviewStatus === 'FAILED' ? (
-                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
-                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">3. Seleksi Wawancara</strong>
-                      <span className="badge bg-danger mt-1">Tidak Lulus</span>
-                    </div>
-                  ) : administrationStatus === 'PASSED' ? (
-                    <div className="p-3 rounded border border-primary bg-primary-subtle text-primary h-100">
-                      <i className="bi bi-chat-dots-fill fs-3 mb-2 d-block text-primary"></i>
-                      <strong className="d-block small">3. Seleksi Wawancara</strong>
-                      <span className="badge bg-primary mt-1">Siap Wawancara</span>
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded border bg-light text-muted h-100">
-                      <i className="bi bi-chat-left-dots fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">3. Seleksi Wawancara</strong>
-                      <span className="badge bg-secondary mt-1">Akan Datang</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Step 4: Pengumuman Kelulusan */}
-                <div className="col-md-3">
-                  {isAccepted ? (
-                    <div className="p-3 rounded border border-success bg-success-subtle text-success h-100 shadow-sm">
-                      <i className="bi bi-trophy-fill fs-3 mb-2 d-block text-warning"></i>
-                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
-                      <span className="badge bg-success mt-1">Diterima</span>
-                    </div>
-                  ) : isRejected ? (
-                    <div className="p-3 rounded border border-danger bg-danger-subtle text-danger h-100">
-                      <i className="bi bi-x-circle-fill fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
-                      <span className="badge bg-danger mt-1">Tidak Lolos</span>
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded border bg-light text-muted h-100">
-                      <i className="bi bi-award fs-3 mb-2 d-block"></i>
-                      <strong className="d-block small">4. Pengumuman Kelulusan</strong>
-                      <span className="badge bg-secondary mt-1">Menunggu</span>
-                    </div>
-                  )}
+                  </form>
                 </div>
               </div>
             </div>
           </div>
+        )}
 
-          {/* Ringkasan Data yang Dikirimkan */}
-          <div className="card shadow-sm border-0 mb-4">
-            <div className="card-header bg-white border-bottom py-3">
-              <h6 className="fw-bold mb-0 text-dark">
-                <i className="bi bi-file-earmark-person me-2 text-primary"></i>Ringkasan Data Permohonan
-              </h6>
-            </div>
-            <div className="card-body p-4">
-              <div className="row g-3">
-                <div className="col-md-6">
-                  <small className="text-muted d-block">Program Beasiswa</small>
-                  <strong>{programName}</strong>
+        {/* ══════════════════════════════════════════════════════════ */}
+        {/* MODAL DATA PENDAFTARAN (READ-ONLY) (#wizardReadonlyModal)  */}
+        {/* ══════════════════════════════════════════════════════════ */}
+        {showReadonlyModal && (
+          <div className="modal fade show d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+            <div className="modal-dialog modal-lg modal-dialog-scrollable">
+              <div className="modal-content border-0 shadow">
+                <div className="modal-header bg-secondary text-white">
+                  <h5 className="modal-title fw-bold">
+                    <i className="bi bi-lock-fill me-2"></i>Arsip Data Pendaftaran ({isAccepted ? 'Lulus' : 'Read-Only'})
+                  </h5>
+                  <button type="button" className="btn-close btn-close-white" onClick={() => setShowReadonlyModal(false)}></button>
                 </div>
-                <div className="col-md-6">
-                  <small className="text-muted d-block">Nama Lengkap</small>
-                  <strong>{fullName}</strong>
-                </div>
-                <div className="col-md-6">
-                  <small className="text-muted d-block">NIK (Nomor Induk Kependudukan)</small>
-                  <span className="font-monospace">{nik}</span>
-                </div>
-                <div className="col-md-6">
-                  <small className="text-muted d-block">Alamat Email &amp; No. HP</small>
-                  <span>{email} | {phoneNumber}</span>
-                </div>
-                <div className="col-md-6">
-                  <small className="text-muted d-block">Domisili</small>
-                  <span>{villageName}, {districtName}, {regencyName}, {provinceName}</span>
-                </div>
-                <div className="col-md-6">
-                  <small className="text-muted d-block">Pendidikan &amp; Instansi</small>
-                  <span>{educationLevel} — {institutionName} {major ? `(${major})` : ''}</span>
-                </div>
-              </div>
+                <div className="modal-body p-0">
+                  {/* Status List Group (Mockup 6_index_lulus) */}
+                  <div className="p-3 bg-light border-bottom">
+                    <ul className="list-group list-group-flush small rounded border">
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>Nama Lengkap:</strong>
+                        <span>{fullName || user?.fullName}</span>
+                      </li>
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>NIK:</strong>
+                        <span className="font-monospace">{nik || user?.nik}</span>
+                      </li>
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>Program:</strong>
+                        <span>{programName}</span>
+                      </li>
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>Seleksi Administrasi:</strong>
+                        <span>{administrationStatus === 'PASSED' ? 'Disetujui / Lolos' : administrationStatus === 'REJECTED' ? 'Tidak Lolos' : 'Dalam Proses'}</span>
+                      </li>
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>Seleksi Wawancara:</strong>
+                        <span>{interviewStatus === 'PASSED' ? 'Lulus Wawancara' : interviewStatus === 'FAILED' ? 'Tidak Lulus' : 'Menunggu Jadwal'}</span>
+                      </li>
+                      <li className="list-group-item d-flex justify-content-between">
+                        <strong>Hasil Akhir:</strong>
+                        <span className={`badge ${isAccepted ? 'bg-success' : isRejected ? 'bg-danger' : 'bg-info text-dark'}`}>
+                          {isAccepted ? 'LULUS / DITERIMA' : isRejected ? 'TIDAK DITERIMA' : 'PROSES SELEKSI'}
+                        </span>
+                      </li>
+                    </ul>
+                  </div>
 
-              <hr className="my-3" />
+                  {/* Tabs Detail Data */}
+                  <ul className="nav nav-tabs nav-justified wizard-steps bg-white border-bottom">
+                    <li className="nav-item">
+                      <button
+                        type="button"
+                        className={`nav-link ${readonlyActiveTab === 'ringkasan' ? 'active' : ''}`}
+                        onClick={() => setReadonlyActiveTab('ringkasan')}
+                      >
+                        Ringkasan
+                      </button>
+                    </li>
+                    <li className="nav-item">
+                      <button
+                        type="button"
+                        className={`nav-link ${readonlyActiveTab === 'datadiri' ? 'active' : ''}`}
+                        onClick={() => setReadonlyActiveTab('datadiri')}
+                      >
+                        1. Data Diri &amp; Kontak
+                      </button>
+                    </li>
+                    <li className="nav-item">
+                      <button
+                        type="button"
+                        className={`nav-link ${readonlyActiveTab === 'pendidikan' ? 'active' : ''}`}
+                        onClick={() => setReadonlyActiveTab('pendidikan')}
+                      >
+                        2. Pendidikan &amp; Pekerjaan
+                      </button>
+                    </li>
+                    <li className="nav-item">
+                      <button
+                        type="button"
+                        className={`nav-link ${readonlyActiveTab === 'berkas' ? 'active' : ''}`}
+                        onClick={() => setReadonlyActiveTab('berkas')}
+                      >
+                        3. Berkas Dokumen
+                      </button>
+                    </li>
+                  </ul>
 
-              <h6 className="fw-bold small text-secondary mb-2">Dokumen Terlampir &amp; Terverifikasi:</h6>
-              <div className="row g-2">
-                {Object.entries(uploadedDocs).map(([code, doc]) => (
-                  <div className="col-md-6" key={code}>
-                    <div className="p-2 border rounded bg-light d-flex align-items-center justify-content-between">
-                      <div className="d-flex align-items-center gap-2 overflow-hidden">
-                        <i className="bi bi-file-earmark-pdf text-danger fs-4"></i>
-                        <div className="text-truncate">
-                          <strong className="small d-block text-truncate">{doc.originalFilename}</strong>
-                          <span className="text-muted" style={{ fontSize: '0.75rem' }}>
-                            {code} • {formatBytes(doc.fileSize)}
-                          </span>
+                  <div className="p-3">
+                    {readonlyActiveTab === 'ringkasan' && (
+                      <div className="small">
+                        <div className="row g-3">
+                          <div className="col-sm-6">
+                            <span className="text-muted d-block">Nomor Registrasi:</span>
+                            <strong className="font-monospace text-primary fs-6">{registrationCode}</strong>
+                          </div>
+                          <div className="col-sm-6">
+                            <span className="text-muted d-block">Tanggal Pengiriman:</span>
+                            <span>{submittedAt ? new Date(submittedAt).toLocaleString('id-ID') : '-'}</span>
+                          </div>
+                          <div className="col-sm-6">
+                            <span className="text-muted d-block">Alamat Email &amp; No. HP:</span>
+                            <span>{email} | {phoneNumber}</span>
+                          </div>
+                          <div className="col-sm-6">
+                            <span className="text-muted d-block">Pendidikan Terakhir:</span>
+                            <span>{educationLevel} — {institutionName} {major ? `(${major})` : ''}</span>
+                          </div>
                         </div>
                       </div>
-                      <span className="badge bg-success-subtle text-success border border-success-subtle rounded-pill">
-                        <i className="bi bi-shield-check me-1"></i> Clean
-                      </span>
-                    </div>
+                    )}
+
+                    {readonlyActiveTab === 'datadiri' && (
+                      <div className="row g-2 small">
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">NIK</label>
+                          <input type="text" className="form-control form-control-sm" value={nik} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Nama Lengkap</label>
+                          <input type="text" className="form-control form-control-sm" value={fullName} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Email</label>
+                          <input type="text" className="form-control form-control-sm" value={email} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">No. HP / WhatsApp</label>
+                          <input type="text" className="form-control form-control-sm" value={phoneNumber} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Tempat / Tanggal Lahir</label>
+                          <input type="text" className="form-control form-control-sm" value={`${birthPlace || '-'}, ${birthDate || '-'}`} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Jenis Kelamin</label>
+                          <input type="text" className="form-control form-control-sm" value={gender === 'MALE' ? 'Laki-laki' : 'Perempuan'} disabled />
+                        </div>
+                        <div className="col-12">
+                          <label className="form-label text-muted mb-1">Alamat Lengkap</label>
+                          <input type="text" className="form-control form-control-sm" value={`${address || '-'}, ${villageName || ''}, ${districtName || ''}, ${regencyName || ''}, ${provinceName || ''}`} disabled />
+                        </div>
+                      </div>
+                    )}
+
+                    {readonlyActiveTab === 'pendidikan' && (
+                      <div className="row g-2 small">
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Jenjang Pendidikan</label>
+                          <input type="text" className="form-control form-control-sm" value={educationLevel} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Nama Perguruan Tinggi / Sekolah</label>
+                          <input type="text" className="form-control form-control-sm" value={institutionName} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Jurusan / Program Studi</label>
+                          <input type="text" className="form-control form-control-sm" value={major || '-'} disabled />
+                        </div>
+                        <div className="col-md-6">
+                          <label className="form-label text-muted mb-1">Tahun Lulus</label>
+                          <input type="text" className="form-control form-control-sm" value={graduationYear || '-'} disabled />
+                        </div>
+                        <div className="col-12">
+                          <label className="form-label text-muted mb-1">Pekerjaan Saat Ini</label>
+                          <input type="text" className="form-control form-control-sm" value={currentOccupation || 'Belum / Tidak Bekerja'} disabled />
+                        </div>
+                      </div>
+                    )}
+
+                    {readonlyActiveTab === 'berkas' && (
+                      <div>
+                        <div className="list-group list-group-flush small">
+                          {Object.entries(uploadedDocs).length === 0 ? (
+                            <div className="text-muted text-center py-3">Tidak ada berkas terunggah</div>
+                          ) : (
+                            Object.entries(uploadedDocs).map(([code, doc]) => (
+                              <div key={code} className="list-group-item d-flex justify-content-between align-items-center py-2 px-0">
+                                <div className="d-flex align-items-center gap-2">
+                                  <i className="bi bi-file-earmark-pdf-fill text-danger fs-4"></i>
+                                  <div>
+                                    <strong>{code}</strong> — <span className="text-dark">{doc.originalFilename}</span>
+                                    <div className="text-muted" style={{ fontSize: '0.75rem' }}>{formatBytes(doc.fileSize)} • Clean</div>
+                                  </div>
+                                </div>
+                                <a
+                                  href={`/api/v1/documents/${doc.documentId}/content${getAccessToken() ? `?token=${encodeURIComponent(getAccessToken()!)}` : ''}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="btn btn-sm btn-outline-primary"
+                                >
+                                  <i className="bi bi-eye me-1"></i>Lihat Berkas
+                                </a>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                ))}
+                </div>
+                <div className="modal-footer bg-light">
+                  <button type="button" className="btn btn-secondary" onClick={() => setShowReadonlyModal(false)}>
+                    Tutup
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="card-footer bg-white border-top p-3 text-center">
-              <Link to="/" className="btn btn-primary px-4 fw-semibold">
-                <i className="bi bi-house me-2"></i>Kembali ke Beranda
-              </Link>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════ */}
+        {/* MODAL SURAT KELULUSAN RESMI (PDF / PRINTABLE)              */}
+        {/* ══════════════════════════════════════════════════════════ */}
+        {showSuratModal && (
+          <div className="modal fade show d-block" tabIndex={-1} style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
+            <div className="modal-dialog modal-lg modal-dialog-scrollable">
+              <div className="modal-content border-0 shadow">
+                <div className="modal-header bg-dark text-white no-print">
+                  <h5 className="modal-title fw-bold">
+                    <i className="bi bi-file-earmark-pdf-fill text-warning me-2"></i>Surat Keterangan Kelulusan Seleksi (SK)
+                  </h5>
+                  <button type="button" className="btn-close btn-close-white" onClick={() => setShowSuratModal(false)}></button>
+                </div>
+                <div className="modal-body p-4 bg-white" id="printable-surat-modal">
+                  {/* Kop Surat Resmi */}
+                  <div className="text-center pb-3 mb-3 border-bottom border-dark border-3" style={{ borderBottomStyle: 'double' }}>
+                    <div className="d-flex align-items-center justify-content-center gap-3 mb-2">
+                      <i className="bi bi-award-fill text-warning fs-1"></i>
+                      <div>
+                        <h6 className="fw-bold mb-0 text-uppercase" style={{ letterSpacing: '1px' }}>
+                          KEMENTERIAN KOMUNIKASI DAN DIGITAL REPUBLIK INDONESIA
+                        </h6>
+                        <h5 className="fw-bold mb-0 text-uppercase text-primary">
+                          BADAN PENGEMBANGAN SUMBER DAYA MANUSIA KOMUNIKASI DAN DIGITAL
+                        </h5>
+                        <small className="text-muted">
+                          Jl. Medan Merdeka Barat No. 9, Jakarta Pusat 10110 | Website: https://komdigi.go.id | Email: beasiswa@komdigi.go.id
+                        </small>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Nomor & Judul Surat */}
+                  <div className="text-center mb-4">
+                    <h6 className="fw-bold text-decoration-underline mb-1">SURAT KEPUTUSAN KELULUSAN SELEKSI</h6>
+                    <div className="small text-muted font-monospace">Nomor: BIT/SK-LULUS/2026/{registrationCode || 'REG-2026-FINAL'}</div>
+                    <div className="small fw-semibold mt-1">Tentang: Penetapan Penerima Beasiswa Indonesia Talenta Tahun Anggaran 2026</div>
+                  </div>
+
+                  {/* Isi Surat */}
+                  <p className="small text-secondary" style={{ lineHeight: 1.6 }}>
+                    Berdasarkan hasil rekapitulasi Uji Administrasi dan Uji Wawancara Komprehensif oleh Tim Penguji dan Panitia Seleksi Nasional, dengan ini menetapkan bahwa calon peserta di bawah ini:
+                  </p>
+
+                  <div className="card bg-light border p-3 mb-3">
+                    <table className="table table-sm table-borderless mb-0 small">
+                      <tbody>
+                        <tr>
+                          <td style={{ width: '220px' }} className="text-muted">Nama Lengkap</td>
+                          <td style={{ width: '10px' }}>:</td>
+                          <td className="fw-bold text-dark">{fullName || user?.fullName}</td>
+                        </tr>
+                        <tr>
+                          <td className="text-muted">Nomor Induk Kependudukan (NIK)</td>
+                          <td>:</td>
+                          <td className="font-monospace">{nik || user?.nik}</td>
+                        </tr>
+                        <tr>
+                          <td className="text-muted">Nomor Registrasi Seleksi</td>
+                          <td>:</td>
+                          <td className="font-monospace fw-bold text-primary">{registrationCode}</td>
+                        </tr>
+                        <tr>
+                          <td className="text-muted">Program Pelatihan Beasiswa</td>
+                          <td>:</td>
+                          <td className="fw-bold text-dark">{programName}</td>
+                        </tr>
+                        <tr>
+                          <td className="text-muted">Status Keputusan Akhir</td>
+                          <td>:</td>
+                          <td>
+                            <span className="badge bg-success px-3 py-1 fw-bold fs-6">
+                              <i className="bi bi-patch-check-fill me-1"></i> DITERIMA SEBAGAI PENERIMA BEASISWA
+                            </span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="small text-secondary" style={{ lineHeight: 1.6 }}>
+                    Kepada peserta yang bersangkutan diwajibkan:
+                  </p>
+                  <ol className="small text-secondary ps-3 mb-4" style={{ lineHeight: 1.6 }}>
+                    <li>Melakukan konfirmasi kehadiran / daftar ulang paling lambat tanggal <strong>10 September 2026</strong> pukul 23:59 WIB.</li>
+                    <li>Mengikuti sesi Orientasi Pembukaan Beasiswa pada tanggal <strong>15 September 2026</strong>.</li>
+                    <li>Mematuhi seluruh ketentuan dan kode etik penyelenggaraan Program Beasiswa Indonesia Talenta.</li>
+                  </ol>
+
+                  {/* Pengesahan Tanda Tangan */}
+                  <div className="row mt-4 pt-2">
+                    <div className="col-6 text-center">
+                      <div className="p-2 border rounded d-inline-block bg-light">
+                        <i className="bi bi-qr-code fs-1 d-block"></i>
+                        <small className="font-monospace text-muted" style={{ fontSize: '0.65rem' }}>
+                          VERIFIED-BIT-2026<br />DIGITALLY SIGNED
+                        </small>
+                      </div>
+                    </div>
+                    <div className="col-6 text-center small">
+                      <div className="text-muted">Ditetapkan di: Jakarta</div>
+                      <div className="text-muted mb-4">Pada tanggal: {submittedAt ? new Date(submittedAt).toLocaleDateString('id-ID', { day: '2-digit', month: 'long', year: 'numeric' }) : '02 September 2026'}</div>
+                      <div className="fw-bold text-decoration-underline mt-4">Panitia Seleksi Beasiswa</div>
+                      <div className="text-muted" style={{ fontSize: '0.75rem' }}>Badan Pengembangan SDM Komunikasi &amp; Digital</div>
+                    </div>
+                  </div>
+                </div>
+                <div className="modal-footer bg-light no-print d-flex justify-content-between">
+                  <button type="button" className="btn btn-secondary" onClick={() => setShowSuratModal(false)}>
+                    Tutup
+                  </button>
+                  <button type="button" className="btn btn-warning fw-bold text-dark" onClick={() => window.print()}>
+                    <i className="bi bi-printer-fill me-1"></i> Cetak / Simpan PDF
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }
