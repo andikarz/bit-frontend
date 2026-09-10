@@ -37,7 +37,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (onSuccess) {
         onSuccess();
       } else if (loggedUser.role === 'PESERTA') {
-        navigate('/daftar');
+        const pending = sessionStorage.getItem('pending_program_id');
+        if (pending) {
+          sessionStorage.removeItem('pending_program_id');
+          navigate(`/daftar?programId=${pending}`);
+        } else {
+          navigate('/daftar');
+        }
       } else if (loggedUser.role === 'ADMIN') {
         navigate('/admin');
       } else if (loggedUser.role === 'VERIFIKATOR') {

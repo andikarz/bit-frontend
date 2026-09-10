@@ -43,8 +43,11 @@ export const ApplicationWizardPage: React.FC = () => {
   const [isEditingRevision, setIsEditingRevision] = useState(false);
   const [submittedAt, setSubmittedAt] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<number>(1);
+  const [availablePrograms, setAvailablePrograms] = useState<any[]>([]);
+  const [selectedProgramId, setSelectedProgramId] = useState<string>('');
   const [programName, setProgramName] = useState('Pelatihan Beasiswa');
   const [programRequirements, setProgramRequirements] = useState<any[]>([]);
+  const [isChangingProgram, setIsChangingProgram] = useState(false);
 
   // ── Modal & Confirmation State (Mockup 6_index_lulus.html) ────
   const [showDaftarUlangModal, setShowDaftarUlangModal] = useState(false);
@@ -116,6 +119,22 @@ export const ApplicationWizardPage: React.FC = () => {
     const initApplication = async () => {
       setIsLoading(true);
       try {
+        // Fetch published programs from master service
+        let publishedList: any[] = [];
+        try {
+          const progRes = await api.get('/api/v1/programs');
+          publishedList = progRes?.data?.data || progRes?.data || (Array.isArray(progRes) ? progRes : []);
+          if (Array.isArray(publishedList) && publishedList.length > 0) {
+            setAvailablePrograms(publishedList);
+          }
+        } catch (e) {
+          console.warn('Failed to load published programs list:', e);
+        }
+
+        const queryProgId = searchParams.get('programId');
+        const sessionProgId = sessionStorage.getItem('pending_program_id');
+        const desiredProgId = queryProgId || sessionProgId || (publishedList.length > 0 ? publishedList[0].id : 'prog-ai-cloud-2026');
+
         let appData: any = null;
         try {
           const res = await api.get('/api/v1/applications/my-active');
@@ -124,19 +143,38 @@ export const ApplicationWizardPage: React.FC = () => {
           // No active draft yet
         }
 
-        // If no active draft, create one with idempotency key
+        // If user already has a DRAFT and specifically selected a different program (via URL param or session):
+        if (appData && appData.submissionStatus === 'DRAFT' && (queryProgId || sessionProgId)) {
+          const targetToSwitch = queryProgId || sessionProgId;
+          if (targetToSwitch && targetToSwitch !== appData.programId) {
+            try {
+              const switchRes = await api.put(`/api/v1/applications/${appData.id}/program`, {
+                programId: targetToSwitch
+              });
+              if (switchRes.data) {
+                appData = switchRes.data;
+              }
+            } catch (err) {
+              console.warn('Failed to switch draft program:', err);
+            }
+          }
+        }
+
+        // If no active draft, create one with the desired program
         if (!appData) {
           const idemKey = `idem-${user?.id}-${Date.now()}`;
           const createRes = await api.post(
             '/api/v1/applications',
-            { programId: targetProgramId },
+            { programId: desiredProgId },
             { headers: { 'Idempotency-Key': idemKey } }
           );
           appData = createRes.data;
         }
+        sessionStorage.removeItem('pending_program_id');
 
         if (appData) {
           setApplicationId(appData.id);
+          setSelectedProgramId(appData.programId || desiredProgId);
           setRegistrationCode(appData.registrationCode);
           setSubmissionStatus(appData.submissionStatus || 'DRAFT');
           setAdministrationStatus(appData.administrationStatus || 'NOT_STARTED');
@@ -215,7 +253,34 @@ export const ApplicationWizardPage: React.FC = () => {
     };
 
     initApplication();
-  }, [targetProgramId, user]);
+  }, [searchParams, user]);
+
+  // Program switcher handler for DRAFT applications
+  const handleProgramChange = async (newProgId: string) => {
+    if (!applicationId || newProgId === selectedProgramId || isChangingProgram) return;
+    setIsChangingProgram(true);
+    setSaveError(null);
+    try {
+      const res = await api.put(`/api/v1/applications/${applicationId}/program`, {
+        programId: newProgId
+      });
+      if (res.data) {
+        const updated = res.data;
+        setSelectedProgramId(updated.programId);
+        if (updated.programSnapshot) {
+          setProgramName(updated.programSnapshot.name || 'Pelatihan Beasiswa');
+          setProgramRequirements(updated.programSnapshot.requirements || []);
+        }
+        setSaveSuccess(`Pilihan program beasiswa berhasil dialihkan ke: ${updated.programSnapshot?.name || 'Program Baru'}`);
+        setTimeout(() => setSaveSuccess(null), 4000);
+      }
+    } catch (err: any) {
+      setSaveError(err.message || 'Gagal mengalihkan program beasiswa');
+      setTimeout(() => setSaveError(null), 4000);
+    } finally {
+      setIsChangingProgram(false);
+    }
+  };
 
   // Refresh application status on demand
   const refreshStatus = useCallback(async (showFeedback = false) => {
@@ -1534,9 +1599,44 @@ export const ApplicationWizardPage: React.FC = () => {
         <div className="card shadow-sm border-0 mb-4">
           <div className="card-body p-4">
             <div className="d-flex flex-wrap justify-content-between align-items-center gap-3">
-              <div>
-                <span className="badge bg-primary-subtle text-primary mb-1">Formulir Pendaftaran Beasiswa</span>
-                <h4 className="fw-bold mb-1 text-dark">{programName}</h4>
+              <div style={{ flex: '1 1 520px' }}>
+                <div className="d-flex align-items-center gap-2 mb-1">
+                  <span className="badge bg-primary-subtle text-primary">Formulir Pendaftaran Beasiswa</span>
+                  {availablePrograms.length > 1 && submissionStatus === 'DRAFT' && (
+                    <span className="badge bg-info-subtle text-info border">
+                      <i className="bi bi-collection me-1"></i>Tersedia {availablePrograms.length} Pilihan Program
+                    </span>
+                  )}
+                </div>
+
+                {submissionStatus === 'DRAFT' && availablePrograms.length > 1 ? (
+                  <div className="my-2 p-2 bg-light rounded border">
+                    <label className="form-label small fw-bold text-dark mb-1 d-flex align-items-center gap-1">
+                      <i className="bi bi-mortarboard-fill text-primary"></i> Program Beasiswa yang Dipilih:
+                    </label>
+                    <select
+                      className="form-select fw-bold text-primary border-primary bg-white shadow-sm"
+                      value={selectedProgramId}
+                      onChange={(e) => handleProgramChange(e.target.value)}
+                      disabled={isChangingProgram}
+                    >
+                      {availablePrograms.map((prog) => (
+                        <option key={prog.id} value={prog.id}>
+                          {prog.name} — ({prog.method === 'DARING' ? 'Online' : prog.method === 'HYBRID' ? 'Hybrid' : 'Tatap Muka'}) | Kuota: {prog.quota}
+                        </option>
+                      ))}
+                    </select>
+                    {isChangingProgram && (
+                      <small className="text-muted d-block mt-1">
+                        <span className="spinner-border spinner-border-sm me-1 text-primary"></span>
+                        Memperbarui program beasiswa &amp; persyaratan dokumen...
+                      </small>
+                    )}
+                  </div>
+                ) : (
+                  <h4 className="fw-bold mb-1 text-dark">{programName}</h4>
+                )}
+
                 <p className="text-muted small mb-0">
                   Silakan isi seluruh tahapan data dengan teliti dan unggah dokumen persyaratan yang sah.
                 </p>
@@ -1638,6 +1738,36 @@ export const ApplicationWizardPage: React.FC = () => {
                 <h6 className="fw-bold mb-3 text-primary">
                   <i className="bi bi-person-badge me-2"></i>Bagian 1: Data Pribadi Calon Peserta
                 </h6>
+
+                {/* Info Program Terpilih */}
+                <div className="alert alert-primary bg-primary-subtle border-primary-subtle mb-4 p-3 rounded-3 d-flex flex-wrap align-items-center justify-content-between gap-2">
+                  <div>
+                    <div className="small text-uppercase fw-bold text-primary mb-1">
+                      <i className="bi bi-award-fill me-1"></i> Program Beasiswa yang Anda Daftarkan:
+                    </div>
+                    <div className="fw-bold fs-6 text-dark">{programName}</div>
+                    <small className="text-muted">
+                      Persyaratan dokumen berkas pada Bagian 3 disesuaikan khusus untuk program beasiswa ini.
+                    </small>
+                  </div>
+                  {availablePrograms.length > 1 && submissionStatus === 'DRAFT' && (
+                    <div>
+                      <select
+                        className="form-select form-select-sm border-primary text-primary fw-semibold shadow-sm"
+                        value={selectedProgramId}
+                        onChange={(e) => handleProgramChange(e.target.value)}
+                        disabled={isChangingProgram}
+                      >
+                        {availablePrograms.map((prog) => (
+                          <option key={prog.id} value={prog.id}>
+                            Ganti ke: {prog.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
                 <div className="row g-3">
                   <div className="col-md-6">
                     <label className="form-label fw-semibold small">Nomor Induk Kependudukan (NIK) *</label>

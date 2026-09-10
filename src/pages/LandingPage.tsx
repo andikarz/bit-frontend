@@ -133,6 +133,7 @@ export const LandingPage: React.FC = () => {
   };
 
   const handleStartApply = (program: ProgramItem) => {
+    sessionStorage.setItem('pending_program_id', program.id);
     if (!user) {
       setIsLoginOpen(true);
     } else if (user.role === 'PESERTA') {

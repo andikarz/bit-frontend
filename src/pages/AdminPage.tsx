@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../services/api';
+import { api, getAccessToken, setAccessToken } from '../services/api';
 import { Link } from 'react-router-dom';
 
 // ── Interfaces ────────────────────────────────────────────────
@@ -1106,10 +1106,38 @@ export const AdminPage: React.FC = () => {
   const handleExportExcel = async () => {
     setIsExporting(true);
     try {
-      const token = localStorage.getItem('access_token');
-      const response = await fetch('/api/v1/results/export', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      let token = getAccessToken() || localStorage.getItem('access_token');
+      const params = new URLSearchParams();
+      if (resultsSearch.trim()) params.append('search', resultsSearch.trim());
+      if (resultsFilterStatus) params.append('finalStatus', resultsFilterStatus);
+      const queryStr = params.toString() ? `?${params.toString()}` : '';
+
+      let response = await fetch(`/api/v1/results/export${queryStr}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: 'include'
       });
+
+      // Silent token refresh retry if 401
+      if (response.status === 401) {
+        try {
+          const refreshRes = await fetch('/api/v1/auth/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include'
+          });
+          if (refreshRes.ok) {
+            const refreshData = await refreshRes.json();
+            token = refreshData.accessToken || refreshData.data?.accessToken;
+            if (token) setAccessToken(token);
+            response = await fetch(`/api/v1/results/export${queryStr}`, {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+              credentials: 'include'
+            });
+          }
+        } catch {
+          // Ignore refresh error and let response.ok check fail below
+        }
+      }
 
       if (!response.ok) throw new Error('Gagal mengunduh file ekspor');
 
